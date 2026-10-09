@@ -1,0 +1,11 @@
+# Game-derived data and tools: extracted physics, GLB/SVJ output, temporary
+# mesh workspaces, PCarsTools.exe and the game's Oodle DLL. All of this is
+# regenerated from a local Project CARS 2 install and must not be committed.
+_pcars2/
+
+# SVJ specification (obtained separately; schema validation is skipped when absent)
+svj_spec/
+
+# Python
+__pycache__/
+*.pyc
