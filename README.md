@@ -1,11 +1,11 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.97 files, with matching **GLB** 3D models.
+Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.99.2 files, with matching **GLB** 3D models.
 
 You point it at your own Project CARS 2 installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
 - one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ schema
-- one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse textures), linked from the SVJ file
+- one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse, normal and specular textures), linked from the SVJ file through SVJ visual bindings
 
 All 212 drivable cars convert.
 
@@ -26,7 +26,7 @@ All 212 drivable cars convert.
   _pcars2/tools/win-x64/PCarsTools.exe
   ```
 - A .NET runtime, version 7 or newer. PCarsTools targets .NET 6; the converter lets it run on a newer runtime automatically.
-- *Optional:* the SVJ specification (`SVJ-standard-vehicle-json`), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`, for schema validation. Without it, validation is skipped and reported as such.
+- *Optional:* the [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`, for schema validation. Without it, validation is skipped and reported as such.
 
 You don't need to download anything else. PCarsTools expects an Oodle DLL named `oo2core_7_win64.dll`, and the converter copies the game's own `oo2core_4_win64.dll` under that name.
 
@@ -87,13 +87,13 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 
 **Coordinates** follow SVJ's SAE J670 convention: X forward, Y right, Z down, origin at the front-axle midpoint on the ground. Units are SI, except engine displacement, which the SVJ spec gives in litres.
 
-**3D models** use glTF's Y-up convention. Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game.
+**3D models** use glTF's Y-up convention. Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game. Parts are grouped under nodes named by the SVJ naming convention (`SVJ::body::chassis`, `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel`, …), and the SVJ file binds only the nodes its GLB actually contains.
 
 ## Known limitations
 
 - Tyre models have inverted normals in the game's own source data, so tyres may look flat-shaded.
-- Only diffuse textures are embedded, capped at 512 px. Normal and specular maps are ignored.
-- Suspension link geometry isn't stored by the game, which models kinematics with lookup tables instead. The links in the SVJ files are representative estimates.
+- Textures are capped at 512 px. Specular maps are approximated: gloss becomes roughness, and the specular colour uses the optional `KHR_materials_specular` extension as a reflectance mask.
+- Suspension links in the SVJ files are representative estimates. The game's suspension files do contain real link geometry, which isn't decoded yet.
 
 ## Project layout
 

@@ -256,25 +256,74 @@ def _apply_vhf(svj: dict, vhf_data: Optional[dict]) -> None:
             ch[key] = vhf_data[key]
 
 
+_STATION = {"fl": "FL", "fr": "FR", "rl": "RL", "rr": "RR"}
+
+
+def _apply_bindings(svj: dict, mesh_id: str, svj_nodes: List[str]) -> None:
+    """
+    Write SVJ visual bindings (spec §22.3) for the glTF nodes the GLB really
+    contains, at the binding site each node belongs to. Nodes the GLB lacks
+    get no binding: pCARS2 has no separate upright mesh, for instance, so
+    uprights stay unbound rather than pointing at a node that doesn't exist.
+    """
+    def bind(node: str) -> dict:
+        return {"mesh_ref": mesh_id, "node": node}
+
+    # Start clean: earlier versions bound nodes the GLB never had
+    # (e.g. SVJ::body::upright_fl at corner level).
+    def strip(o):
+        if isinstance(o, dict):
+            o.pop("visual", None)
+            for v in o.values():
+                strip(v)
+        elif isinstance(o, list):
+            for v in o:
+                strip(v)
+    strip(svj)
+
+    susp = svj.get("suspension", {})
+    for node in svj_nodes:
+        _, category, ident = node.split("::")
+        if node == "SVJ::body::chassis" and "chassis" in svj:
+            svj["chassis"]["visual"] = bind(node)
+        elif node == "SVJ::steering::wheel" and "steering" in svj:
+            svj["steering"].setdefault("steering_wheel", {})["visual"] = bind(node)
+        elif category in ("wheel", "brake"):
+            part, corner = ident.rsplit("_", 1)
+            station = susp.get(_STATION.get(corner, ""))
+            if station is None:
+                continue
+            if part == "wheel" and "wheel" in station:
+                station["wheel"]["visual"] = bind(node)
+            elif part == "disc" and "disc" in station.get("brake", {}):
+                station["brake"]["disc"]["visual"] = bind(node)
+            elif part == "caliper" and "brake" in station:
+                station["brake"].setdefault("caliper", {})["visual"] = bind(node)
+
+
 def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
-                        vhf_data: Optional[dict] = None):
+                        vhf_data: Optional[dict] = None,
+                        svj_nodes: Optional[List[str]] = None):
     """
     Update the assets.meshes section in a .svj.json file to reference the GLB,
-    and backfill chassis geometry from the VHF where it's still missing.
+    bind the GLB's SVJ nodes, and backfill chassis geometry from the VHF
+    where it's still missing.
     """
     with open(svj_path, encoding="utf-8") as f:
         svj = json.load(f)
 
+    # Schema requires ^[a-z0-9_]+$; car names like 'porsche_935-78' have hyphens
+    mesh_id = re.sub(r"[^a-z0-9_]", "_", car_name.lower())
     svj["assets"] = {
         "meshes": [
             {
-                # Schema requires ^[a-z0-9_]+$; car names like 'porsche_935-78' have hyphens
-                "id":          re.sub(r"[^a-z0-9_]", "_", car_name.lower()),
+                "id":          mesh_id,
                 "uri":         glb_uri,
                 "description": "Project CARS 2 vehicle mesh (auto-extracted, LOD-A)",
             }
         ]
     }
+    _apply_bindings(svj, mesh_id, svj_nodes or [])
     _apply_vhf(svj, vhf_data)
 
     with open(svj_path, "w", encoding="utf-8") as f:
@@ -341,8 +390,8 @@ def process_car(
     if common_tex.is_dir():
         tex_dirs.append(str(common_tex))
 
-    ok = convert_car_to_glb(car_name, str(meb_dir), str(glb_out), tex_dirs)
-    if not ok:
+    svj_nodes = convert_car_to_glb(car_name, str(meb_dir), str(glb_out), tex_dirs)
+    if not svj_nodes:
         return False
 
     # ── 5. Parse VHF for wheelbase / track ──────────────────────────────────
@@ -366,7 +415,7 @@ def process_car(
                 glb_rel = os.path.relpath(str(glb_out), svj_dir).replace("\\", "/")
             except ValueError:
                 glb_rel = str(glb_out.resolve()).replace("\\", "/")
-            _update_svj_assets(str(svj_path), car_name, glb_rel, vhf_data)
+            _update_svj_assets(str(svj_path), car_name, glb_rel, vhf_data, svj_nodes)
             print(f"    SVJ updated: assets.meshes → {glb_rel}")
 
     # ── 7. Cleanup ───────────────────────────────────────────────────────────

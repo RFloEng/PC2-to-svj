@@ -143,6 +143,30 @@ def parse_vhf_transforms(vhf_path: Path) -> Dict[str, Transform]:
     return out
 
 
+_CORNER = {"lf": "fl", "rf": "fr", "lr": "rl", "rr": "rr"}   # game -> SVJ station
+_CORNER_PART = re.compile(r"_(wheel|tire|tyre|disc|caliper)_(lf|rf|lr|rr)(?:_|$)")
+
+
+def svj_node_for(part_name: str) -> str:
+    """
+    SVJ glTF node (spec §22.5) a game mesh part belongs to.
+
+    Wheels and tyres group under the wheel node, discs and calipers get brake
+    nodes, the steering wheel its steering node; everything else (panels,
+    interior, lights, the combined suspension mesh...) is part of the body.
+    """
+    n = part_name.lower()
+    m = _CORNER_PART.search(n)
+    if m:
+        kind, corner = m.group(1), _CORNER[m.group(2)]
+        if kind in ("wheel", "tire", "tyre"):
+            return f"SVJ::wheel::wheel_{corner}"
+        return f"SVJ::brake::{kind}_{corner}"
+    if "steeringwheel" in n or "steering_wheel" in n:
+        return "SVJ::steering::wheel"
+    return "SVJ::body::chassis"
+
+
 def _find_vhf(meb_dir: str) -> Optional[Path]:
     d = Path(meb_dir)
     for cand in (d, d.parent, d.parent.parent):
@@ -193,59 +217,68 @@ def _default_color_for(name: str) -> Tuple[float, float, float, float]:
     return _DEFAULT_COLOR_FALLBACK
 
 
-def _parse_bmt_diffuse(bmt_path: Path) -> Optional[str]:
-    """
-    Extract the diffuseTexture path from a pCARS2 .bmt binary material file.
-    Returns a relative path like 'vehicles\\textures\\foo_diff.dds', or None.
-    """
-    data = bmt_path.read_bytes()
-    # Scan for readable strings; the diffuse DDS path comes right before 'diffuseTexture'
-    strings = []
-    s = b""
-    for b in data:
-        if 32 <= b <= 126:
-            s += bytes([b])
-        else:
-            if len(s) >= 5:
-                strings.append(s.decode("ascii", errors="replace"))
-            s = b""
-    # First string ending in .dds that appears before 'diffuseTexture'
-    for i, st in enumerate(strings):
-        if st.endswith(".dds"):
-            # Check if the next string mentions 'diffuse' or it's the first DDS
-            next_mention = strings[i + 1] if i + 1 < len(strings) else ""
-            if "diffuse" in next_mention.lower() or i == 0:
-                return st
-    # Fallback: any first .dds
-    for st in strings:
-        if st.endswith(".dds"):
-            return st
-    return None
+# Texture slots read from .bmt materials and used in the GLB
+_SLOTS = ("diffuseTexture", "normalTexture", "specularTexture")
 
 
-def _build_texture_map(search_dirs: List[Path]) -> Dict[str, Optional[str]]:
+def _parse_bmt_textures(bmt_path: Path) -> Dict[str, str]:
     """
-    Scan search_dirs for .bmt files, extract diffuse DDS path for each.
-    Returns dict: bmt_stem_lower → absolute_dds_path_or_None
+    Read the texture slots of a pCARS2 .bmt binary material.
+
+    In the material's string table each texture path is followed directly by
+    its slot name, e.g. 'vehicles\\textures\\foo_nmp8888.dds', 'normalTexture'.
+    Returns {slot: relative_dds_path} for the slots in _SLOTS.
     """
-    result: Dict[str, Optional[str]] = {}
+    strings = [s.decode("ascii", errors="replace")
+               for s in re.findall(rb"[ -~]{4,}", bmt_path.read_bytes())]
+    slots: Dict[str, str] = {}
+    for i, st in enumerate(strings[:-1]):
+        if st.lower().endswith(".dds") and strings[i + 1] in _SLOTS:
+            slots.setdefault(strings[i + 1], st)
+    if "diffuseTexture" not in slots:
+        first = next((s for s in strings if s.lower().endswith(".dds")), None)
+        if first:
+            slots["diffuseTexture"] = first
+    return slots
+
+
+def _build_texture_map(search_dirs: List[Path]) -> Dict[str, Dict[str, str]]:
+    """
+    Scan search_dirs for .bmt files and resolve their texture slots to files.
+    Returns {bmt_stem_lower: {slot: absolute_dds_path}}; slots whose DDS isn't
+    present (e.g. shared textures in CommonVehicleTextures.bff) are omitted.
+    """
     all_dds: Dict[str, str] = {}   # filename_lower → absolute_path
-
     for d in search_dirs:
         for p in d.rglob("*.dds"):
             all_dds[p.name.lower()] = str(p)
 
+    result: Dict[str, Dict[str, str]] = {}
     for d in search_dirs:
         for bmt in d.rglob("*.bmt"):
-            rel_path = _parse_bmt_diffuse(bmt)
-            if rel_path:
-                dds_fname = Path(rel_path).name.lower()
-                abs_path = all_dds.get(dds_fname)
-                result[bmt.stem.lower()] = abs_path
-            else:
-                result[bmt.stem.lower()] = None
-
+            resolved = {}
+            for slot, rel in _parse_bmt_textures(bmt).items():
+                hit = all_dds.get(Path(rel.replace("\\", "/")).name.lower())
+                if hit:
+                    resolved[slot] = hit
+            result[bmt.stem.lower()] = resolved
     return result
+
+
+def _open_dds(dds_path: str, mode: str):
+    """Open a DDS with Pillow as `mode`, downscaled to <= _MAX_TEXTURE_SIZE."""
+    img = _PILImage.open(dds_path).convert(mode)
+    w, h = img.size
+    if max(w, h) > _MAX_TEXTURE_SIZE:
+        f = _MAX_TEXTURE_SIZE / max(w, h)
+        img = img.resize((max(1, int(w * f)), max(1, int(h * f))), _PILImage.LANCZOS)
+    return img
+
+
+def _png(img) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
 def _load_dds_png(dds_path: str) -> Optional[bytes]:
@@ -253,22 +286,55 @@ def _load_dds_png(dds_path: str) -> Optional[bytes]:
     if not HAS_PIL:
         return None
     try:
-        img = _PILImage.open(dds_path)
-        # Convert to RGBA for reliable PNG output
-        img = img.convert("RGBA")
-        # Resize if too large
-        w, h = img.size
-        if max(w, h) > _MAX_TEXTURE_SIZE:
-            factor = _MAX_TEXTURE_SIZE / max(w, h)
-            img = img.resize(
-                (max(1, int(w * factor)), max(1, int(h * factor))),
-                _PILImage.LANCZOS
-            )
-        buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
+        return _png(_open_dds(dds_path, "RGBA"))
     except Exception:
         return None
+
+
+def _load_normal_png(dds_path: str) -> Optional[bytes]:
+    """
+    Convert a pCARS2 '_nmp8888' normal map to a glTF normal texture.
+
+    The game stores two channels (X in red, Y in green, blue empty) with
+    DirectX's +Y-down convention — measured on the raised bolt heads in
+    ford_gt40_badges_nmp8888: red rises left->right, green falls top->bottom.
+    glTF wants +X right, +Y toward the image top and an explicit Z, so green
+    is inverted and Z is rebuilt as sqrt(1 - x^2 - y^2).
+    """
+    if not HAS_PIL:
+        return None
+    try:
+        a = np.asarray(_open_dds(dds_path, "RGB"), dtype=np.float32)
+    except Exception:
+        return None
+    x = a[..., 0] / 127.5 - 1.0
+    y = -(a[..., 1] / 127.5 - 1.0)
+    z = np.sqrt(np.clip(1.0 - x * x - y * y, 0.0, 1.0))
+    n = np.stack([x, y, z], axis=-1)
+    out = np.clip((n * 0.5 + 0.5) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    return _png(_PILImage.fromarray(out, "RGB"))
+
+
+def _load_spec_pngs(dds_path: str) -> Optional[Tuple[bytes, bytes]]:
+    """
+    Split a pCARS2 specular map into glTF inputs: (specular colour, roughness).
+
+    RGB is the specular colour; alpha is gloss (it selects between the
+    material's min/max specular power — low on tyres, ~34/255, high on light
+    lenses, up to 255). Roughness is approximated as 1 - gloss and written to
+    the green channel of a metallicRoughness texture (blue = metallic = 0).
+    """
+    if not HAS_PIL:
+        return None
+    try:
+        img = _open_dds(dds_path, "RGBA")
+    except Exception:
+        return None
+    a = np.asarray(img)
+    rough = np.zeros(a.shape[:2] + (3,), np.uint8)
+    rough[..., 1] = 255 - a[..., 3]
+    return _png(_PILImage.fromarray(np.ascontiguousarray(a[..., :3]), "RGB")), \
+        _png(_PILImage.fromarray(rough, "RGB"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,11 +371,43 @@ def _make_glb_from_mebs(
     textures_:    List[gltf.Texture]    = []
 
     # ── Texture map ───────────────────────────────────────────────────────────
-    tex_map: Dict[str, Optional[str]] = {}   # bmt_stem → dds_path
+    tex_map: Dict[str, Dict[str, str]] = {}   # bmt_stem → {slot: dds_path}
     if texture_search_dirs and HAS_PIL:
         dirs = [Path(d) for d in texture_search_dirs if os.path.isdir(d)]
         if dirs:
             tex_map = _build_texture_map(dirs)
+
+    # ── Image embedding (each source image embedded once per GLB) ────────────
+    tex_cache: Dict[Tuple[str, str], Optional[int]] = {}
+
+    def _embed(png_bytes: bytes) -> int:
+        """Store a PNG in the binary buffer; return its glTF texture index."""
+        png_offset = len(bin_data)
+        bin_data.extend(png_bytes)
+        while len(bin_data) % 4:
+            bin_data.append(0)
+        buffer_views.append(gltf.BufferView(buffer=0, byteOffset=png_offset,
+                                            byteLength=len(png_bytes)))
+        images.append(gltf.Image(mimeType="image/png",
+                                 bufferView=len(buffer_views) - 1))
+        textures_.append(gltf.Texture(source=len(images) - 1))
+        return len(textures_) - 1
+
+    def _cached(path: str, kind: str, loader) -> Optional[int]:
+        key = (path.lower(), kind)
+        if key not in tex_cache:
+            data = loader(path)
+            tex_cache[key] = _embed(data) if data else None
+        return tex_cache[key]
+
+    def _spec_textures(path: str) -> Tuple[Optional[int], Optional[int]]:
+        key = (path.lower(), "spec")
+        if key not in tex_cache:
+            pair = _load_spec_pngs(path)
+            tex_cache[key] = (_embed(pair[0]), _embed(pair[1])) if pair else None
+        return tex_cache[key] or (None, None)
+
+    used_specular_ext = [False]
 
     # ── Cache: material name → glTF material index ───────────────────────────
     mat_cache: Dict[str, int] = {}
@@ -322,55 +420,45 @@ def _make_glb_from_mebs(
 
         # Derive BMT stem from .mtx path: "vehicles\GT86\Toy_GT86_PAINT.mtx" → "toy_gt86_paint"
         mtx_stem = Path(mat_name).stem.lower()
+        slots = tex_map.get(mtx_stem, {})
 
-        # Look up DDS texture
-        dds_path = tex_map.get(mtx_stem)
+        # Diffuse → base colour (tiny swatches become a flat colour instead)
         tex_idx: Optional[int] = None
-
-        # Attempt to embed the DDS texture
         embedded_color = None   # sampled RGBA if texture is too small to use
+        dds_path = slots.get("diffuseTexture")
         if dds_path:
             png_bytes = _load_dds_png(dds_path)
             if png_bytes:
-                # Check if the decoded image is large enough to be useful
-                import io as _io
-                _probe = _PILImage.open(_io.BytesIO(png_bytes))
-                _w, _h = _probe.size
-                if max(_w, _h) < _MIN_TEXTURE_SIZE:
+                _probe = _PILImage.open(io.BytesIO(png_bytes))
+                if max(_probe.size) < _MIN_TEXTURE_SIZE:
                     # Too small (pCARS2 solid-color paint swatch etc.) — sample the
                     # dominant colour and use it as a PBR baseColorFactor instead.
-                    _probe = _probe.convert("RGBA")
-                    _px = list(_probe.getdata())
-                    embedded_color = (
-                        sum(p[0] for p in _px) / len(_px) / 255.0,
-                        sum(p[1] for p in _px) / len(_px) / 255.0,
-                        sum(p[2] for p in _px) / len(_px) / 255.0,
-                        sum(p[3] for p in _px) / len(_px) / 255.0,
-                    )
-                    dds_path = None   # don't embed the texture
+                    px = np.asarray(_probe.convert("RGBA"), dtype=np.float32)
+                    embedded_color = tuple(float(c) for c in px.reshape(-1, 4).mean(0) / 255.0)
                 else:
-                    # Proper texture — embed as usual
-                    img = gltf.Image()
-                    img.mimeType = "image/png"
-                    img.bufferView = None
-                    png_offset = len(bin_data)
-                    bin_data.extend(png_bytes)
-                    while len(bin_data) % 4:
-                        bin_data.append(0)
-                    bv = gltf.BufferView(
-                        buffer=0,
-                        byteOffset=png_offset,
-                        byteLength=len(png_bytes),
-                    )
-                    buffer_views.append(bv)
-                    bv_idx = len(buffer_views) - 1
-                    img.bufferView = bv_idx
-                    images.append(img)
-                    img_idx = len(images) - 1
+                    tex_idx = _cached(dds_path, "diffuse", lambda p: png_bytes)
 
-                    tex = gltf.Texture(source=img_idx)
-                    textures_.append(tex)
-                    tex_idx = len(textures_) - 1
+        # Normal map and specular map (roughness + specular colour)
+        normal_idx = (_cached(slots["normalTexture"], "normal", _load_normal_png)
+                      if "normalTexture" in slots else None)
+        spec_color_idx = rough_idx = None
+        if "specularTexture" in slots:
+            spec_color_idx, rough_idx = _spec_textures(slots["specularTexture"])
+
+        def _finish(mat: "gltf.Material") -> None:
+            if normal_idx is not None:
+                mat.normalTexture = gltf.NormalMaterialTexture(index=normal_idx)
+            if rough_idx is not None:
+                mat.pbrMetallicRoughness.metallicRoughnessTexture = gltf.TextureInfo(index=rough_idx)
+                mat.pbrMetallicRoughness.roughnessFactor = 1.0
+            if spec_color_idx is not None:
+                # Specular colour as a reflectance mask over the default
+                # dielectric F0 (0.04): black = no reflection, white = default.
+                # The game's values are artistic intensities, not physical F0.
+                mat.extensions = {"KHR_materials_specular": {
+                    "specularColorTexture": {"index": spec_color_idx},
+                }}
+                used_specular_ext[0] = True
 
         # Build the PBR material
         if tex_idx is not None:
@@ -384,6 +472,7 @@ def _make_glb_from_mebs(
                 pbrMetallicRoughness=pbr,
                 doubleSided=True,
             )
+            _finish(mat)
         else:
             # Solid-color fallback: use sampled colour from tiny texture OR defaults
             if embedded_color is not None:
@@ -410,6 +499,8 @@ def _make_glb_from_mebs(
                 doubleSided=True,
                 alphaMode="BLEND" if is_glass else "OPAQUE",
             )
+            if not is_glass:
+                _finish(mat)
 
         materials.append(mat)
         idx = len(materials) - 1
@@ -539,9 +630,20 @@ def _make_glb_from_mebs(
     if ok_count == 0:
         return None
 
-    # ── Assemble GLTF2 ───────────────────────────────────────────────────────
+    # ── Group parts under SVJ-named nodes (spec §22.5) ───────────────────────
+    # SVJ visual bindings refer to glTF nodes by name (SVJ::body::chassis,
+    # SVJ::wheel::wheel_fl, ...). Group nodes carry no transform; each part
+    # keeps its own placement from the .vhf.
+    groups: Dict[str, List[int]] = {}
+    for i, n in enumerate(nodes):
+        groups.setdefault(svj_node_for(n.name), []).append(i)
+    group_idx: List[int] = []
+    for name in sorted(groups):
+        nodes.append(gltf.Node(name=name, children=groups[name]))
+        group_idx.append(len(nodes) - 1)
+
     root_idx = len(nodes)
-    nodes.append(gltf.Node(name=car_name, children=list(range(len(nodes)))))
+    nodes.append(gltf.Node(name=car_name, children=group_idx))
 
     buf = gltf.Buffer(byteLength=len(bin_data))
     scene = gltf.Scene(name=car_name, nodes=[root_idx])
@@ -559,11 +661,16 @@ def _make_glb_from_mebs(
         textures=textures_ if textures_ else None,
         asset=gltf.Asset(
             version="2.0",
-            generator="pCARS2->GLB Converter v2 (meb_to_glb.py)",
+            generator="pCARS2->GLB Converter v3 (meb_to_glb.py)",
             extras={"source_game": "Project CARS 2", "car": car_name},
         ),
     )
+    if used_specular_ext[0]:
+        # Optional (not "required"): viewers without it just ignore the
+        # specular colour and still render base colour, normals, roughness.
+        g.extensionsUsed = ["KHR_materials_specular"]
     g.set_binary_blob(bytes(bin_data))
+    g.extras = {"svj_nodes": sorted(groups)}
     return g
 
 
@@ -572,11 +679,14 @@ def convert_car_to_glb(
     meb_dir: str,
     out_path: str,
     texture_dirs: Optional[List[str]] = None,
-) -> bool:
+) -> List[str]:
     """
     Find all suitable .meb files under meb_dir for car_name and convert to GLB.
     If texture_dirs is None, auto-discover DDS files under meb_dir.
-    Returns True on success.
+
+    Returns the SVJ node names created in the GLB (e.g. 'SVJ::body::chassis',
+    'SVJ::wheel::wheel_fl'), so callers bind only nodes that exist. An empty
+    list means the conversion failed.
     """
     meb_files = sorted(
         str(p) for p in Path(meb_dir).rglob("*.meb")
@@ -584,7 +694,7 @@ def convert_car_to_glb(
     )
     if not meb_files:
         print(f"  [WARN] No LOD-A .meb files found under {meb_dir}")
-        return False
+        return []
 
     # Auto-discover texture search dirs (the extraction root)
     if texture_dirs is None:
@@ -597,8 +707,9 @@ def convert_car_to_glb(
     if HAS_PIL and texture_dirs:
         tex_map = _build_texture_map([Path(d) for d in texture_dirs
                                       if os.path.isdir(d)])
-        n_tex = sum(1 for v in tex_map.values() if v is not None)
-        print(f"  Textures: {n_tex} DDS found ({len(tex_map)} materials)")
+        count = lambda slot: sum(1 for v in tex_map.values() if slot in v)
+        print(f"  Textures: {count('diffuseTexture')} diffuse, {count('normalTexture')} normal, "
+              f"{count('specularTexture')} specular ({len(tex_map)} materials)")
     else:
         texture_dirs = None   # disable if no PIL
 
@@ -610,12 +721,12 @@ def convert_car_to_glb(
     g = _make_glb_from_mebs(meb_files, car_name, texture_dirs, transforms)
     if g is None:
         print(f"  [FAIL] {car_name}: no valid geometry")
-        return False
+        return []
 
     g.save_binary(out_path)
     size_kb = Path(out_path).stat().st_size / 1024
     print(f"  OK {car_name} -> {Path(out_path).name}  ({size_kb:.0f} KB)")
-    return True
+    return g.extras["svj_nodes"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

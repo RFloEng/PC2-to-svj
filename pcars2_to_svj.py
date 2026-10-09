@@ -140,6 +140,15 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
     }
 
 
+def mesh_id(car: str) -> str:
+    """
+    The assets.meshes id for a car. The schema requires ^[a-z0-9_]+$, and car
+    names like 'porsche_935-78' contain hyphens. Every visual.mesh_ref must
+    use this same id or the binding doesn't resolve.
+    """
+    return re.sub(r"[^a-z0-9_]", "_", car.lower())
+
+
 def list_cars(extracted_root: str) -> List[str]:
     """Return sorted list of car names for which an edfbin exists."""
     dirs = _physics_dirs(extracted_root)
@@ -678,10 +687,8 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
     chassis: Dict[str, Any] = {
         "mass_total":        mass,
         "center_of_gravity": cg,
-        "visual": {
-            "mesh_ref": car,
-            "node":     "SVJ::body::chassis",
-        },
+        # No visual binding here: it must name a node that exists in the GLB,
+        # so pcars2_extract_meshes adds bindings when it builds the model.
         "_mass_source": mass_source,
         "_note": (
             "mass_total: game spec-sheet weight from statistics .mrdf (default if absent). "
@@ -1051,10 +1058,6 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                 },
             },
             "_est": True,
-            "visual": {
-                "mesh_ref": car,
-                "node":     f"SVJ::body::{node}",
-            },
         }
 
     return {
@@ -1090,7 +1093,7 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
     src = {k: (Path(v).name if v else None) for k, v in files.items()}
     return {
         "specification":         "SVJ",
-        "version":               "0.97",
+        "version":               "0.99.2",
         "description":           f"Project CARS 2 — {car} (pCARS2→SVJ auto-converted)",
         "coordinate_system":     "SAE_J670",
         "units":                 "SI",
@@ -1336,13 +1339,75 @@ def convert_car(car: str, extracted_root: str) -> Dict:
 # Output helpers (shared with the GUI)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def glb_node_names(glb_path: Path) -> Optional[set]:
+    """Node names in a .glb (reads the JSON chunk directly), or None if unreadable."""
+    try:
+        data = glb_path.read_bytes()
+        if data[:4] != b"glTF":
+            return None
+        chunk_len = struct.unpack_from("<I", data, 12)[0]
+        doc = json.loads(data[20:20 + chunk_len])
+        return {n.get("name") for n in doc.get("nodes", []) if n.get("name")}
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+def _prune_bindings(svj: Dict, svj_dir: Path) -> None:
+    """
+    Drop visual bindings that don't resolve: mesh_ref not in assets.meshes,
+    or a node name the referenced GLB doesn't contain (when it can be read).
+    """
+    meshes = {m["id"]: m.get("uri") for m in svj.get("assets", {}).get("meshes", [])
+              if isinstance(m, dict) and "id" in m}
+    names_cache: Dict[str, Optional[set]] = {}
+
+    def ok(v: Dict) -> bool:
+        ref = v.get("mesh_ref") or (next(iter(meshes)) if len(meshes) == 1 else None)
+        if ref not in meshes:
+            return False
+        if ref not in names_cache:
+            uri = meshes[ref]
+            names_cache[ref] = glb_node_names(svj_dir / uri) if uri else None
+        names = names_cache[ref]
+        return names is None or v.get("node") in names
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            if isinstance(o.get("visual"), dict) and not ok(o["visual"]):
+                del o["visual"]
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(svj)
+
+
+def _copy_visual_bindings(old: Any, new: Any) -> None:
+    """Copy every 'visual' block from old into new where the parent exists in both."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        for k, v in old.items():
+            if k == "visual":
+                if isinstance(v, dict) and str(v.get("node", "")).startswith("SVJ::"):
+                    new[k] = v
+            elif k in new:
+                _copy_visual_bindings(v, new[k])
+        # Parts the mesh step created only to hold a binding (caliper,
+        # steering_wheel) don't exist in a fresh conversion: recreate them.
+        for k in ("caliper", "steering_wheel"):
+            if k in old and k not in new and isinstance(old[k], dict) and "visual" in old[k]:
+                new[k] = {"visual": old[k]["visual"]}
+
+
 def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
     """
-    Write an SVJ dict to disk, preserving mesh links from a previous run.
+    Write an SVJ dict to disk, preserving mesh links and visual bindings
+    from a previous run.
 
     The physics converter can't know about meshes, so it always emits
-    assets.meshes = []. Mesh extraction fills that in afterwards; without
-    this, re-running the physics conversion would silently drop the link.
+    assets.meshes = [] and no visual bindings. Mesh extraction fills those in
+    afterwards; without this, re-running the physics conversion would
+    silently drop them.
     """
     p = Path(out_path)
     if p.is_file() and not svj.get("assets", {}).get("meshes"):
@@ -1354,8 +1419,14 @@ def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
                     # Files from before the id fix may carry hyphenated ids,
                     # which the schema's ^[a-z0-9_]+$ pattern rejects.
                     if isinstance(mesh, dict) and isinstance(mesh.get("id"), str):
-                        mesh["id"] = re.sub(r"[^a-z0-9_]", "_", mesh["id"].lower())
+                        mesh["id"] = mesh_id(mesh["id"])
                 svj.setdefault("assets", {})["meshes"] = old_meshes
+                fresh = json.loads(json.dumps(svj))
+                _copy_visual_bindings(old, fresh)
+                # Keep only bindings that resolve to a node in the GLB; this
+                # also drops pre-0.99.2 bindings to nodes the GLB never had.
+                _prune_bindings(fresh, p.parent)
+                svj.clear(); svj.update(fresh)
         except (OSError, ValueError):
             pass   # unreadable old file: just overwrite it
     p.parent.mkdir(parents=True, exist_ok=True)

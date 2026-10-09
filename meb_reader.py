@@ -374,6 +374,13 @@ class MebFile:
             for i in range(self.num_verts):
                 u, v = struct.unpack_from("<ff", raw, i * 8)
                 out.append((u, v))
+        elif s.format == 2 and len(raw) >= self.num_verts * 12:
+            # R32G32B32A32_FLOAT stored as 3×f32 (like POSITION/NORMAL): (u, v, extra).
+            # Used by wheels, tyres and discs; the third float is shader data
+            # (e.g. tyre side), not part of the UV.
+            for i in range(self.num_verts):
+                u, v = struct.unpack_from("<ff", raw, i * 12)
+                out.append((u, v))
         elif s.format == 1:  # R32G32B32A32_TYPELESS → RGBA_FLOAT_TYPELESS[N/2]
             # Each 16-byte entry stores 2 verts: (u0, v0, u1, v1)
             for i in range(self.num_verts):
