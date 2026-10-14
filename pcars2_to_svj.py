@@ -26,7 +26,10 @@ Data coverage
   powertrain.layout          —                ❌ defaults to FR
   powertrain.engine          edfbin           ✅ full RPM + torque curve
   powertrain.gearbox.ratios  gdfbin           ✅ validated on GT86, FR3.5, NSX
-  powertrain.differentials   gdfbin           ⚠ final_drive extracted; type defaults open
+  powertrain.differentials   gdfbin+driveline ⚠ final_drive; AWD diff layout from driveline.rg; type defaults open
+  powertrain.gearbox.type    driveline.rg     ✅ manual / sequential / amt / dct from the setup
+  powertrain.clutch          driveline.rg     ✅ type + max torque
+  powertrain.engine.inertia  driveline.rg     ⚠ crankshaft 1-D mass, unit assumed kg*m^2
   suspension.*.spring.rate   sdfbin           ✅ block structure (N/mm→N/m); front/rear by KC0
   suspension.*.damper        sdfbin           ✅ 777 Ns/m road reference; race=hash=063ea245
   suspension.*.wheel_center  vdfm             ✅ exact wheel-centre XYZ from physics
@@ -138,7 +141,137 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
         "tyres":      d(pers / "tyres"),
         "vehicles":   d(pers / "vehicles"),   # .vdfm master descriptors
         "statistics": d(pers / "statistics"), # .mrdf car-select spec sheets
+        "driveline":  d(pers / "driveline"),  # driveline.rg (text, per-car setups)
     }
+
+
+_DRIVELINE_CACHE: Dict[str, Dict] = {}
+
+
+def _load_driveline(dirs: Dict[str, Optional[str]]) -> Dict:
+    """
+    Parse driveline.rg (plain text) into {"records", "groups", "cars"}.
+
+      RECORD <name> <layout>      then tab-indented "key value" lines
+      RECORDGROUP <name>          then tab-indented member record names
+      l_driveline records bind a car (name "CAR_NAME") to a group (contents).
+    """
+    folder = dirs.get("driveline")
+    path = Path(folder) / "driveline.rg" if folder else None
+    if not path or not path.is_file():
+        return {"records": {}, "groups": {}, "cars": {}}
+    key = str(path)
+    if key in _DRIVELINE_CACHE:
+        return _DRIVELINE_CACHE[key]
+    records: Dict[str, Dict] = {}
+    groups: Dict[str, List[str]] = {}
+    cur: Optional[Dict] = None
+    cur_group: Optional[List[str]] = None
+    for raw in path.read_text(encoding="latin-1").splitlines():
+        line = raw.rstrip()
+        if not line or line.lstrip().startswith("#"):
+            continue
+        if not raw[0].isspace():
+            cur = cur_group = None
+            parts = line.split()
+            if parts[0] == "RECORD" and len(parts) >= 3:
+                cur = {"layout": parts[2], "attrs": {}}
+                records[parts[1]] = cur
+            elif parts[0] == "RECORDGROUP" and len(parts) >= 2:
+                cur_group = groups.setdefault(parts[1], [])
+            continue
+        body = line.strip()
+        if cur is not None:
+            k, _, v = body.partition(" ")
+            cur["attrs"][k] = v.strip().strip('"')
+        elif cur_group is not None:
+            cur_group.append(body.split()[0])
+    cars = {}
+    for rec in records.values():
+        if rec["layout"] == "l_driveline" and rec["attrs"].get("name"):
+            cars[rec["attrs"]["name"].upper()] = rec["attrs"].get("contents")
+    out = {"records": records, "groups": groups, "cars": cars}
+    _DRIVELINE_CACHE[key] = out
+    return out
+
+
+def _num(v: Optional[str]) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except ValueError:
+        return None
+
+
+def _parse_driveline(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
+    """
+    Per-car driveline facts from driveline.rg, or None when the car has no entry.
+
+    Returns group, gearbox_type, clutch (type/max_torque), crank_inertia and
+    diffs (locations present). Differential type and preload are mostly named
+    per-car variables (R_preload, R_gear_lsd ...) that aren't stored anywhere in
+    the extracted files, so they are not reported.
+    """
+    dl = _load_driveline(dirs)
+    group = dl["cars"].get(car.upper())
+    if not group or group not in dl["groups"]:
+        return None
+    members = [(n, dl["records"].get(n)) for n in dl["groups"][group]]
+    info: Dict[str, Any] = {"group": group}
+
+    # Gearbox type from the group's own gearbox record: the quick-shift dog box
+    # (gearbox_GT3) and Hewland boxes are sequential, the synchro AMT is a dual
+    # clutch where the group says so and an automated manual otherwise.
+    gb_name = next((n.lower() for n, r in members
+                    if r and r["layout"] == "l_gearbox"), "")
+    g = group.upper()
+    if "amt_synchro" in gb_name:
+        info["gearbox_type"] = "dct" if ("DUAL" in g and "CLUTCH" in g) else "amt"
+    elif "gt3" in gb_name or "hewland" in gb_name:
+        info["gearbox_type"] = "sequential"
+    else:
+        info["gearbox_type"] = "manual"
+
+    diffs = []
+    for name, rec in members:
+        if rec is None:
+            continue
+        a = rec["attrs"]
+        if rec["layout"] in ("l_clutch", "l_centrifugal_clutch") and "clutch" not in info:
+            t = _num(a.get("clutch:torque"))
+            if t:
+                info["clutch"] = {
+                    "type": "dual_clutch" if info["gearbox_type"] == "dct" else "single_plate",
+                    "max_torque": t}
+        elif rec["layout"] == "shaft" and a.get("name", "").strip('"').startswith("crankshaft"):
+            m = _num(a.get("sim:mass"))
+            if m:
+                info["crank_inertia"] = m
+        elif rec["layout"] == "amalgam_diff":
+            low = name.lower()
+            loc = "center" if "center" in low else "front" if "front" in low else "rear"
+            if loc not in diffs:
+                diffs.append(loc)
+    info["diffs"] = diffs
+    return info
+
+
+def _extra_diffs(dl_info: Optional[Dict], drive: Optional[str], driven: str) -> List[Dict]:
+    """Front/centre diffs of an AWD car, as listed by its driveline.rg setup."""
+    if not dl_info or drive != "AWD":
+        return []
+    out = []
+    for loc in ("front", "center", "rear"):
+        if loc in dl_info["diffs"] and loc != driven:
+            out.append({
+                "id": f"diff_{loc}",
+                "location": loc,
+                "type": "open",
+                "final_drive": 1.0,
+                "_note": ("Present in the car's driveline.rg setup; type defaults to 'open' "
+                          "and final_drive 1.0 is a placeholder (the game's single final-drive "
+                          "ratio is on the driven-axle entry)."),
+            })
+    return out
 
 
 def mesh_id(car: str) -> str:
@@ -1344,7 +1477,7 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
     src = {k: (Path(v).name if v else None) for k, v in files.items()}
     return {
         "specification":         "SVJ",
-        "version":               "0.99.2",
+        "version":               "0.99.3",
         "description":           f"Project CARS 2 — {car} (pCARS2→SVJ auto-converted)",
         "coordinate_system":     "SAE_J670",
         "units":                 "SI",
@@ -1485,6 +1618,25 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     final_drive  = gearbox_raw.pop("final_drive", 3.600)
     gearbox_svj  = {k: v for k, v in gearbox_raw.items()}   # type, ratios, _note
 
+    # driveline.rg: gearbox type, clutch, crank inertia, which diffs exist
+    dl_info = _parse_driveline(dirs, car)
+    clutch_svj = None
+    if dl_info:
+        print(f"  [OK] driveline: {dl_info['group']}")
+        if sf_gdf is not None:
+            gearbox_svj["type"] = dl_info["gearbox_type"]
+            gearbox_svj["_note"] += (" type from driveline.rg group "
+                                     f"{dl_info['group']}.")
+        if dl_info.get("clutch"):
+            clutch_svj = dict(dl_info["clutch"])
+            clutch_svj["_source"] = f"driveline.rg group {dl_info['group']}"
+        if dl_info.get("crank_inertia"):
+            engine["inertia"] = dl_info["crank_inertia"]
+            engine["_inertia_source"] = ("driveline.rg crankshaft mass (1-D shaft inertia, "
+                                         "game units taken as kg*m^2)")
+    else:
+        print("  [WARN] driveline: no entry for this car - gearbox type and clutch use defaults")
+
     suspension = build_suspension(sf_sdf, sf_hdt, car, vdfm=vdfm_data)
 
     # Build top-level tires section from suspension corner data
@@ -1562,6 +1714,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         "powertrain": {
             "layout":  layout,
             "engine":  engine,
+            **({"clutch": clutch_svj} if clutch_svj else {}),
             "gearbox": gearbox_svj,
             "differentials": [
                 {
@@ -1570,12 +1723,11 @@ def convert_car(car: str, extracted_root: str) -> Dict:
                     "type":        "open",
                     "final_drive": round(final_drive, 5),
                     "_note": (
-                        "type defaults to 'open'; differential configuration "
-                        "not yet decoded from pCARS2 physics files. AWD cars get a "
-                        "single driven-axle entry; centre/front diffs are not decoded."
+                        "type defaults to 'open': the game names LSD type and preload "
+                        "per car in variables that aren't in the extracted files."
                     ),
                 }
-            ],
+            ] + _extra_diffs(dl_info, drive, diff_loc),
             "_note": ("layout: FF/AWD from the mrdf drivetrain field; RWD cars "
                       "default to FR because engine position isn't decoded."),
         },

@@ -1,6 +1,6 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.99.2 files, with matching **GLB** 3D models.
+Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.99.3 files, with matching **GLB** 3D models.
 
 You point it at your own Project CARS 2 installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
@@ -78,6 +78,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Gear ratios, final drive | gearbox file (`.gdfbin`) |
 | Mass, drivetrain (RWD/AWD/FWD), displacement, front/rear weight split | car-select spec sheet (`.mrdf`) |
 | Wheel centres, wheelbase, track, tyre width and radius | vehicle descriptor (`.vdfm`) |
+| Gearbox type, clutch type and torque capacity, crankshaft inertia, AWD diff layout (205 of 212 cars) | driveline setup (`driveline.rg`), matched by car name |
 | Spring rates | suspension file (`.sdfbin`) |
 | Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |

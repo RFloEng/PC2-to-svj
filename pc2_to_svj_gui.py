@@ -2,7 +2,7 @@
 """
 Project CARS 2 → SVJ Converter  —  GUI
 ========================================
-Converts pCARS2 physics files (+ optional 3D meshes) to SVJ v0.99.2.
+Converts pCARS2 physics files (+ optional 3D meshes) to SVJ v0.99.3.
 
 Point the GUI at your Project CARS 2 installation folder.
 Physics data is extracted automatically into  _pcars2/out/  next to this script.
@@ -993,7 +993,7 @@ class App(tk.Tk):
             "About",
             "Project CARS 2 -> SVJ Converter\n\n"
             "Converts pCARS2 physics files and vehicle BFF meshes\n"
-            "to Standard Vehicle JSON (SVJ v0.99.2).\n\n"
+            "to Standard Vehicle JSON (SVJ v0.99.3).\n\n"
             + physics_line + mesh_line + extracted_line +
             f"\nExtracted data:  {_EXTRACTED_ROOT}\n"
             f"SVJ output:      {_DEFAULT_SVJ_DIR}\n"
