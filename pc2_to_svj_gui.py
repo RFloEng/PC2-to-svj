@@ -2,7 +2,7 @@
 """
 Project CARS 2 → SVJ Converter  —  GUI
 ========================================
-Converts pCARS2 physics files (+ optional 3D meshes) to SVJ v0.97.
+Converts pCARS2 physics files (+ optional 3D meshes) to SVJ v0.99.2.
 
 Point the GUI at your Project CARS 2 installation folder.
 Physics data is extracted automatically into  _pcars2/out/  next to this script.
@@ -53,7 +53,7 @@ except ImportError:
 
 # ── Fixed paths (no user input needed) ─────────────────────────────────────
 _EXTRACTED_ROOT = _HERE / "_pcars2" / "out"
-_DEFAULT_SVJ_DIR = _HERE / "_pcars2" / "svj_output"
+_DEFAULT_SVJ_DIR = _HERE / "_pcars2" / "cars"
 _PCARSTOOLS     = _HERE / "_pcars2" / "tools" / "win-x64" / "PCarsTools.exe"
 
 # Well-known Steam installation paths to try in order
@@ -381,7 +381,7 @@ class PC2SingleTab(ttk.Frame):
         self.out_var = _entry_row(form, "Output file (.json)", 0,
                                    browse_cmd=self._browse_out)
         tk.Label(form,
-                 text=f"Default: {_DEFAULT_SVJ_DIR}/<car>.svj.json",
+                 text=f"Default: {_DEFAULT_SVJ_DIR}/<car>/<car>.svj.json",
                  bg=BG2, fg=TEXT_DIM, font=("Segoe UI", 8)
                  ).grid(row=1, column=1, sticky="w", padx=4)
 
@@ -488,7 +488,8 @@ class PC2SingleTab(ttk.Frame):
             # write its data under the first car's filename.
             current = self.out_var.get().strip()
             folder = Path(current).parent if current else _DEFAULT_SVJ_DIR
-            self.out_var.set(str(folder / f"{car}.svj.json"))
+            self.out_var.set(str(_DEFAULT_SVJ_DIR / car / f"{car}.svj.json")
+                             if not current else str(folder / f"{car}.svj.json"))
             self.btn.configure(state="normal")
 
     def _convert(self):
@@ -498,7 +499,7 @@ class PC2SingleTab(ttk.Frame):
             return
         car = self.car_lb.get(sel[0])
         out_path = (self.out_var.get().strip()
-                    or str(_DEFAULT_SVJ_DIR / f"{car}.svj.json"))
+                    or str(_DEFAULT_SVJ_DIR / car / f"{car}.svj.json"))
         self.out_var.set(out_path)
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -695,7 +696,7 @@ class PC2BatchTab(ttk.Frame):
                 ))
                 try:
                     svj = pc2.convert_car(car, str(_EXTRACTED_ROOT))
-                    out_path = os.path.join(out_dir, car + ".svj.json")
+                    out_path = os.path.join(out_dir, car, car + ".svj.json")
                     pc2.write_svj(svj, out_path)
                     problems = pc2.validate_svj(svj)
                     if problems:
@@ -748,11 +749,9 @@ class PC2MeshTab(ttk.Frame):
         form = tk.Frame(self, bg=BG2, padx=8, pady=8)
         form.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
         form.columnconfigure(1, weight=1)
-        # SVJ source and GLB output directories only — game dir comes from the shared bar
-        self.svj_var = _entry_row(form, "SVJ directory", 0,
+        # Cars directory only — game dir comes from the shared bar
+        self.svj_var = _entry_row(form, "Cars directory", 0,
                                    browse_cmd=self._browse_svj)
-        self.glb_var = _entry_row(form, "GLB output directory", 1,
-                                   browse_cmd=self._browse_glb)
         self.svj_var.set(str(_DEFAULT_SVJ_DIR))
         tk.Label(form,
                  text="Game folder is taken from the bar above.",
@@ -789,14 +788,9 @@ class PC2MeshTab(ttk.Frame):
         self.log.configure(yscrollcommand=lsb.set)
 
     def _browse_svj(self):
-        d = filedialog.askdirectory(title="Select SVJ output directory")
+        d = filedialog.askdirectory(title="Select cars directory (one folder per car)")
         if d:
             self.svj_var.set(d)
-
-    def _browse_glb(self):
-        d = filedialog.askdirectory(title="Select GLB output directory")
-        if d:
-            self.glb_var.set(d)
 
     def _stop(self):
         self._running = False
@@ -816,13 +810,10 @@ class PC2MeshTab(ttk.Frame):
             )
             return
         svj_dir = self.svj_var.get().strip()
-        glb_dir = self.glb_var.get().strip()
         if not svj_dir or not os.path.isdir(svj_dir):
-            messagebox.showwarning("SVJ dir",
-                                   "Please enter the directory containing .svj.json files.")
+            messagebox.showwarning("Cars dir",
+                                   "Please enter the directory the SVJ files were written to.")
             return
-        if not glb_dir:
-            glb_dir = str(Path(svj_dir).parent / "meshes")
 
         if not _PCARSTOOLS.is_file():
             messagebox.showerror(
@@ -831,12 +822,11 @@ class PC2MeshTab(ttk.Frame):
             )
             return
 
-        os.makedirs(glb_dir, exist_ok=True)
-        work_dir = str(Path(glb_dir).parent / "mesh_work")
-        svj_files = sorted(Path(svj_dir).glob("*.svj.json"))
+        work_dir = str(Path(svj_dir).parent / "mesh_work")
+        svj_files = sorted(Path(svj_dir).glob("*/*.svj.json"))
         cars = [p.stem.replace(".svj", "") for p in svj_files]
         if not cars:
-            messagebox.showinfo("No cars", "No .svj.json files found in SVJ directory.")
+            messagebox.showinfo("No cars", "No <car>/<car>.svj.json files found in the cars directory.")
             return
 
         self._running = True
@@ -847,8 +837,7 @@ class PC2MeshTab(ttk.Frame):
         self.log.clear()
         self.log.append(f"Extracting meshes for {len(cars)} cars…", "head")
         self.log.append(f"  Game: {game_dir}", "dim")
-        self.log.append(f"  SVJ:  {svj_dir}", "dim")
-        self.log.append(f"  GLB:  {glb_dir}", "dim")
+        self.log.append(f"  Cars: {svj_dir}", "dim")
 
         def _run():
             ok = err = 0
@@ -863,7 +852,7 @@ class PC2MeshTab(ttk.Frame):
                     success = pc2mesh.process_car(
                         car_name=car, game_dir=game_dir,
                         pcarstools=str(_PCARSTOOLS),
-                        work_dir=work_dir, glb_dir=glb_dir, svj_dir=svj_dir,
+                        work_dir=work_dir, cars_dir=svj_dir,
                         cleanup=True,
                     )
                     if success:
@@ -1004,7 +993,7 @@ class App(tk.Tk):
             "About",
             "Project CARS 2 -> SVJ Converter\n\n"
             "Converts pCARS2 physics files and vehicle BFF meshes\n"
-            "to Standard Vehicle JSON (SVJ v0.97).\n\n"
+            "to Standard Vehicle JSON (SVJ v0.99.2).\n\n"
             + physics_line + mesh_line + extracted_line +
             f"\nExtracted data:  {_EXTRACTED_ROOT}\n"
             f"SVJ output:      {_DEFAULT_SVJ_DIR}\n"

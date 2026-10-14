@@ -515,7 +515,7 @@ def main():
 
     out = args.out or (Path(args.meb).stem + ".obj")
     n_tris = m.save_obj(out)
-    print(f"\n  Exported {n_tris} triangles → {out}")
+    print(f"\n  Exported {n_tris} triangles -> {out}")
 
 
 if __name__ == "__main__":

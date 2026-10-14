@@ -30,6 +30,7 @@ Data coverage
   suspension.*.spring.rate   sdfbin           ✅ block structure (N/mm→N/m); front/rear by KC0
   suspension.*.damper        sdfbin           ✅ 777 Ns/m road reference; race=hash=063ea245
   suspension.*.wheel_center  vdfm             ✅ exact wheel-centre XYZ from physics
+  suspension.*.topology      sdfbin+vdfm      ✅ link records, placed on the vdfm wheel centres (estimate when undecodable)
   suspension.*.wheel         hdtbin+vdfm      ✅ D from b31155cd; C from b1033b86; E from c0eaf58d
   suspension.*.tire_dims     vdfm             ✅ section_width + free_radius per axle
   suspension.*.brake         —                ❌ defaults only
@@ -39,7 +40,7 @@ Usage
 -----
   python pcars2_to_svj.py --dir ./extracted --list
   python pcars2_to_svj.py --dir ./extracted --car acura_nsx_2017 --out nsx.svj.json
-  python pcars2_to_svj.py --dir ./extracted --all --outdir ./svj_output
+  python pcars2_to_svj.py --dir ./extracted --all --outdir ./cars
 
 Requirements
 ------------
@@ -243,6 +244,7 @@ def _parse_vdfm(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
             "track_front": round(abs(corners["FR"][1] - corners["FL"][1]), 4),
             "track_rear":  round(abs(corners["RR"][1] - corners["RL"][1]), 4),
             "_vdfm_file":  p.name,
+            "_front_axle_x": front_axle_x,   # raw -> SVJ X offset, for other game-frame points
             "tire_front": {
                 "section_width_m": round(twf, 4),
                 "free_radius_m":   round(odf / 2, 4),
@@ -307,6 +309,77 @@ def _parse_mrdf(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     if 0.3 <= disp <= 12.0:
         out["displacement_l"] = round(disp, 3)
     return out
+
+
+# Byte markers inside the sdfbin suspension block (raw primary block; the ShCB
+# record parser can't be used because it splits record bodies at any 0x24).
+_LINK_HEAD = bytes.fromhex("8a1e5909")      # link element; next byte = corner index
+_PT_IN     = bytes.fromhex("4209feeaa302")  # followed by inboard (chassis) xyz f32
+_PT_OUT    = bytes.fromhex("5a44c7e0a302")  # followed by outboard (upright) xyz f32
+_AXLE_REF  = bytes.fromhex("42444209feea2302")  # spring mount: <x f32> 00 <z f32>
+
+Vec3 = Tuple[float, float, float]
+
+
+def parse_sdf_links(sf_sdf: Optional[ShCBFile]) -> Dict[str, Any]:
+    """
+    Read the suspension link geometry stored in an sdfbin.
+
+    Layout (reverse-engineered; consistent across all 145 sdfbin files):
+      link   = 8a1e5909 <corner byte> ... 4209feea a302 <inboard xyz>
+               5a44c7e0 a302 <outboard xyz>
+      single = ... 5a44c7e0 a302 <xyz> with no inboard point; above the
+               wheel centre these are strut top mounts (MacPherson).
+      axle   = 42444209 feea2302 <x f32> 00 <z f32>, one per spring mount;
+               z is that axle's fore/aft position in the link frame.
+    Coordinates are the game's vehicle frame (X left, Y up, Z rear), with Y
+    relative to the wheel centre. Fore/aft, the links are authored around
+    the sdfbin's own axle positions, which can differ from the vdfm wheel
+    centres by up to ~0.5 m (Caterham, Radical); the caller shifts each
+    axle by (vdfm wheel z - axle z). Both points were checked against the
+    game's suspension meshes.
+
+    Returns {"links": [(corner_byte, inboard, outboard)], "tops": [xyz],
+             "axle_z": {"F": z, "R": z}} (axle_z entries may be missing).
+    """
+    if sf_sdf is None:
+        return {"links": [], "tops": [], "axle_z": {}}
+    b = sf_sdf._buf[sf_sdf.header.hdr_size: sf_sdf.header.sec_offset]
+
+    def xyz(o: int) -> Vec3:
+        return struct.unpack_from("<3f", b, o)
+
+    links, paired_outs, tops = [], set(), []
+    o = b.find(_PT_IN)
+    while o != -1:
+        head = o - 5
+        if (head >= 0 and b[head:head + 4] == _LINK_HEAD
+                and b[o + 18:o + 24] == _PT_OUT and o + 36 <= len(b)):
+            links.append((b[o - 1], xyz(o + 6), xyz(o + 24)))
+            paired_outs.add(o + 18)
+        o = b.find(_PT_IN, o + 1)
+
+    o = b.find(_PT_OUT)
+    while o != -1:
+        if o not in paired_outs and o + 18 <= len(b):
+            p = xyz(o + 6)
+            if all(math.isfinite(v) and abs(v) < 4.0 for v in p):
+                tops.append(p)
+        o = b.find(_PT_OUT, o + 1)
+
+    zs = []
+    o = b.find(_AXLE_REF)
+    while o != -1 and o + 17 <= len(b):
+        z = struct.unpack_from("<f", b, o + 13)[0]
+        if math.isfinite(z) and abs(z) < 4.0:
+            zs.append(z)
+        o = b.find(_AXLE_REF, o + 1)
+    axle_z = {}
+    if any(z < 0 for z in zs):
+        axle_z["F"] = min(zs)
+    if any(z > 0 for z in zs):
+        axle_z["R"] = max(zs)
+    return {"links": links, "tops": tops, "axle_z": axle_z}
 
 
 def _parse_sdf_physics(sf_sdf: Optional[ShCBFile]) -> Dict[str, float]:
@@ -389,7 +462,7 @@ def _safe_shcb(path: Optional[str], label: str) -> Optional[ShCBFile]:
     try:
         return ShCBFile(path)
     except Exception as exc:
-        print(f"  [WARN] {label}: parse error — {exc}")
+        print(f"  [WARN] {label}: parse error - {exc}")
         return None
 
 
@@ -913,6 +986,162 @@ def _estimated_double_wishbone(wc: List[float], axle: str
     return hardpoints, links
 
 
+_MAX_JOINT_REACH = 0.45   # m: an upright joint farther than this from its wheel centre is rejected
+
+
+def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
+                     ) -> Dict[str, Tuple[str, Dict[str, List[float]], List[Dict]]]:
+    """
+    Build SVJ suspension topology per corner from the sdfbin link geometry.
+
+    Links are assigned to a corner by geometry (side from X, axle from the
+    nearest sdfbin axle position), moved fore/aft onto the vdfm wheel centre
+    of that axle, converted to SVJ SAE J670 (heights are stored relative to
+    the wheel centre), and grouped: links that share an upright joint form
+    one A-arm. Checked against the game's own suspension meshes, where the
+    joints then sit on mesh vertices.
+
+    Layout per corner:
+      2 A-arms (+ link)        -> double_wishbone
+      1 A-arm + link + strut   -> macpherson (strut top from the standalone point)
+      3 or more links          -> multi_link
+      1 A-arm (+ link), pivot axis near lateral -> trailing_arm (< 10 deg)
+                                                   or semi_trailing_arm (< 60 deg)
+      anything else            -> not returned (caller keeps the estimate;
+                                  e.g. live axles, which SVJ models as an
+                                  axle body the link records don't describe)
+
+    Returns {station: (system_type, hardpoints, links)} for corners that pass
+    the sanity checks (every upright joint within _MAX_JOINT_REACH of the wheel
+    centre, both corners of an axle present).
+    """
+    if not vdfm or not sdf_links.get("links"):
+        return {}
+    fax = vdfm["_front_axle_x"]
+    # Fore/aft (raw z) of each axle: as authored in the sdfbin, and in the vdfm
+    wheel_z = {a: -vdfm[a + "L"][0] - fax for a in ("F", "R")}
+    link_z = {a: sdf_links.get("axle_z", {}).get(a, wheel_z[a]) for a in ("F", "R")}
+
+    def station_of(p_raw: Vec3) -> str:
+        side = "L" if p_raw[0] > 0 else "R"
+        axle = min(("F", "R"), key=lambda a: abs(p_raw[2] - link_z[a]))
+        return axle + side
+
+    def to_sae(p: Vec3, st: str) -> List[float]:
+        z = p[2] + wheel_z[st[0]] - link_z[st[0]]
+        return [round(-z - fax, 4), round(-p[0], 4), round(-(p[1] - vdfm[st][2]), 4)]
+
+    corners: Dict[str, List[Tuple[List[float], List[float]]]] = {}
+    for _, inb, outb in sdf_links["links"]:
+        st = station_of(outb)
+        corners.setdefault(st, []).append((to_sae(inb, st), to_sae(outb, st)))
+    tops: Dict[str, List[float]] = {}
+    for p in sdf_links.get("tops", []):
+        st = station_of(p)
+        if p[1] > 0.1 and st not in tops:          # above the wheel centre
+            tops[st] = to_sae(p, st)
+
+    out: Dict[str, Tuple[str, Dict[str, List[float]], List[Dict]]] = {}
+    for st, pairs in corners.items():
+        wc = vdfm[st]
+        if any(math.hypot(o[0] - wc[0], o[1] - wc[1]) > _MAX_JOINT_REACH for _, o in pairs):
+            continue
+        front = st[0] == "F"
+        groups: Dict[Tuple[float, ...], List[List[float]]] = {}
+        for inb, outb in pairs:
+            groups.setdefault(tuple(round(v, 3) for v in outb), []).append(inb)
+        arms = [(list(k), v) for k, v in groups.items() if len(v) >= 2]
+        singles = [(list(k), v[0]) for k, v in groups.items() if len(v) == 1]
+        n_links = len(arms) + len(singles)
+
+        if len(arms) == 2:
+            system = "double_wishbone"
+        elif len(arms) == 1 and singles and st in tops and n_links <= 3:
+            system = "macpherson"
+        elif n_links >= 3:
+            system = "multi_link"
+        elif len(arms) == 1 and n_links <= 2 and len(arms[0][1]) == 2:
+            a, b = arms[0][1]
+            axis = math.degrees(math.atan2(abs(a[0] - b[0]), abs(a[1] - b[1])))
+            if axis < 10.0:
+                system = "trailing_arm"
+            elif axis < 60.0:
+                system = "semi_trailing_arm"
+            else:
+                continue
+        else:
+            continue
+
+        hp: Dict[str, List[float]] = {"wheel_center": [round(v, 4) for v in wc]}
+        links: List[Dict] = []
+        used: set = set()
+
+        def add(name: str, kind: str, inboard: List[List[float]], outb: List[float],
+                joint_name: str) -> None:
+            base, n = name, 2
+            while name in used:
+                name, n = f"{base}_{n}", n + 1
+            used.add(name)
+            hp[joint_name if joint_name not in hp else f"{name}_outer"] = outb
+            ref = joint_name if hp.get(joint_name) is outb else f"{name}_outer"
+            links.append({
+                "name": name, "type": kind,
+                "inboard_points": inboard,
+                "outboard_ref": f"hardpoints.{ref}",
+                "joint_type": "spherical",
+                "inboard_joint_type": "revolute" if kind == "arm" else "spherical",
+            })
+
+        # A-arms: higher upright joint (more negative Z, Z is down) is the upper one
+        arms.sort(key=lambda a: a[0][2])
+        if len(arms) == 2:
+            add("upper_wishbone", "arm", arms[0][1], arms[0][0], "upper_ball_joint")
+            add("lower_wishbone", "arm", arms[1][1], arms[1][0], "lower_ball_joint")
+        elif system in ("trailing_arm", "semi_trailing_arm"):
+            add(system, "arm", arms[0][1], arms[0][0], f"{system}_outer")
+        elif len(arms) == 1:
+            upper = arms[0][0][2] < wc[2] and system != "macpherson"
+            add("upper_wishbone" if upper else "lower_wishbone", "arm", arms[0][1], arms[0][0],
+                "upper_ball_joint" if upper else "lower_ball_joint")
+
+        # Single links: the one reaching farthest fore/aft of the wheel centre
+        # is the steering tie rod (front) or toe link (rear).
+        if singles:
+            singles.sort(key=lambda s: -abs(s[0][0] - wc[0]))
+            toe = singles.pop(0)
+            if front:
+                add("tie_rod", "rod", [toe[1]], toe[0], "tie_rod_end")
+            else:
+                add("toe_link", "rod", [toe[1]], toe[0], "toe_link_outer")
+        for outb, inb in singles:
+            along = abs(inb[0] - outb[0]) > abs(inb[1] - outb[1])
+            if along:
+                add("trailing_arm", "rod", [inb], outb, "trailing_arm_outer")
+            else:
+                level = "upper" if outb[2] < wc[2] else "lower"
+                pos = "front" if outb[0] >= wc[0] else "rear"
+                add(f"{level}_link_{pos}", "rod", [inb], outb, f"{level}_link_{pos}_outer")
+
+        for link in links:
+            if (link["name"].startswith("upper")
+                    and any(p[1] * wc[1] < 0 for p in link["inboard_points"])):
+                link["_note"] = ("Inboard end lies past the vehicle centreline: this is how the "
+                                 "game represents a strut, as a long virtual upper link.")
+        if system == "macpherson":
+            top = tops[st]
+            hp["strut_top"] = top
+            links.append({"name": "strut", "type": "strut", "inboard_points": [top],
+                          "outboard_ref": "hardpoints.strut_top",
+                          "joint_type": "translational", "inboard_joint_type": "fixed"})
+        out[st] = (system, hp, links)
+
+    # Keep an axle only when both of its corners decoded (avoids half-real axles)
+    for axle in ("F", "R"):
+        if (axle + "L" in out) != (axle + "R" in out):
+            out.pop(axle + "L", None); out.pop(axle + "R", None)
+    return out
+
+
 # Wheel-centre fallback when no vdfm is found (SVJ SAE J670, front-axle origin)
 _DEFAULT_WHEELBASE = 2.60
 _DEFAULT_TRACK     = 1.55
@@ -933,7 +1162,8 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
     Damper: pCARS2 uses a reference constant 777 Ns/m in the sdfbin for road
       cars (all values ~776.99, car-independent).  Race cars with explicit
       damper records (hash=063ea245) use those values instead.
-    Topology: defaults to double_wishbone (most pCARS2 cars).
+    Topology: decoded from the sdfbin link records where the layout is
+      recognised (_real_topologies); otherwise a flagged double-wishbone estimate.
 
     Tire and brake data are embedded within each corner per the SVJ schema.
     """
@@ -961,6 +1191,8 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                     mid = damp_candidates[len(damp_candidates) // 2]
                     front_damper = rear_damper = round(mid, 1)
                 break
+
+    real_topo = _real_topologies(parse_sdf_links(sf_sdf), vdfm)
 
     tire_f = _tire_data(sf_hdt, car, "front")
     tire_r = _tire_data(sf_hdt, car, "rear")
@@ -993,7 +1225,33 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             section_width = None
             tire_src_note = tire["_note"]
 
-        hardpoints, links = _estimated_double_wishbone(wc_sae, axle)
+        if tag in real_topo:
+            system_type, hardpoints, links = real_topo[tag]
+            topo_extra = {
+                "_wheel_center_source": wc_source,
+                "_topology_source": "pcars2_sdfbin",
+                "_note": (
+                    "Hardpoints and links decoded from the sdfbin link records, "
+                    "placed on the vdfm wheel centre. "
+                    "system_type and link names are inferred from the layout; "
+                    "upright mass and joint types are estimates."
+                ),
+            }
+        else:
+            system_type = "double_wishbone"
+            hardpoints, links = _estimated_double_wishbone(wc_sae, axle)
+            topo_extra = {
+                "_est": True,
+                "_wheel_center_source": wc_source,
+                "_note": (
+                    "Only wheel_center comes from game data (when _wheel_center_source "
+                    "is pcars2_vdfm). No link geometry was decoded for this axle "
+                    "(no sdfbin of its own, or a layout the converter doesn't "
+                    "recognise, such as a live axle), so system_type, the other "
+                    "hardpoints and the links are representative double-wishbone "
+                    "estimates."
+                ),
+            }
 
         wheel_dict: Dict[str, Any] = {
             "rim_diameter":       tire["rim_diameter"],
@@ -1012,7 +1270,7 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
 
         return {
             "topology": {
-                "system_type": "double_wishbone",   # default — pCARS2 doesn't expose this
+                "system_type": system_type,
                 "upright": {
                     "id":       node,
                     "mass":     12.0,
@@ -1020,14 +1278,7 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                     "body_ref": node,
                 },
                 "links": links,
-                "_est": True,
-                "_wheel_center_source": wc_source,
-                "_note": (
-                    "Only wheel_center comes from game data (when _wheel_center_source "
-                    "is pcars2_vdfm). pCARS2 models kinematics with K&C lookup tables, "
-                    "not link geometry, so system_type, the other hardpoints and the "
-                    "links are representative double-wishbone estimates."
-                ),
+                **topo_extra,
             },
             "wheel": wheel_dict,
             "spring": {
@@ -1121,8 +1372,8 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
             "vehicle_info.drive_type (defaults to RWD)",
             "chassis.center_of_gravity (height Z not stored; X from weight split when available)",
             "chassis.mass_total (default 1200 kg; no mrdf found)",
-            "suspension.*.topology (system_type, links and all hardpoints except "
-            "wheel_center are estimates)",
+            "suspension.*.topology (estimated on corners whose topology has _est: "
+            "system_type, links and all hardpoints except wheel_center)",
             "suspension.*.brake (disc type/size estimated)",
             "steering.* (all placeholders)",
         ],
@@ -1207,7 +1458,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     if vdfm_data:
         print("  [OK] vdfm: wheel centres read from pcars2_vdfm")
     else:
-        print("  [WARN] vdfm: not found — hardpoints will be empty")
+        print("  [WARN] vdfm: not found - hardpoints will be empty")
 
     # Game spec sheet: mass, drivetrain, weight distribution, displacement
     mrdf_data = _parse_mrdf(dirs, car) or {}
@@ -1215,7 +1466,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         print(f"  [OK] mrdf: {mrdf_data.get('mass_kg')} kg, "
               f"{mrdf_data.get('drive_type')}, {mrdf_data.get('displacement_l')} L")
     else:
-        print("  [WARN] mrdf: not found — mass and drivetrain use defaults")
+        print("  [WARN] mrdf: not found - mass and drivetrain use defaults")
 
     print("  Building SVJ sections ...")
 
@@ -1288,6 +1539,9 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         resolved.add("vehicle_info.drive_type")
     if drive in ("FWD", "AWD"):
         resolved.add("powertrain.layout")
+    if all(not suspension.get(c, {}).get("topology", {}).get("_est")
+           for c in ("FL", "FR", "RL", "RR")):
+        resolved.add("suspension.*.topology")
     metadata["_known_placeholders"] = [
         p for p in metadata["_known_placeholders"]
         if p.split(" ")[0] not in resolved
@@ -1501,7 +1755,7 @@ Examples
   python pcars2_to_svj.py --dir ./extracted --car mclaren_p1 --out p1.svj.json
 
   # Batch: convert every available car to an output directory
-  python pcars2_to_svj.py --dir ./extracted --all --outdir ./svj
+  python pcars2_to_svj.py --dir ./extracted --all --outdir ./cars
 
 See PCARS2_EXTRACTION_NOTES.md for the full extraction recipe.
         """,
@@ -1551,23 +1805,24 @@ See PCARS2_EXTRACTION_NOTES.md for the full extraction recipe.
         if not cars:
             print("No cars found.")
             return
-        # Use --outdir directly if given; otherwise default to <dir>/svj_output
-        outdir = Path(args.outdir) if args.outdir else Path(args.dir) / "svj_output"
+        # One folder per car (<outdir>/<car>/<car>.svj.json); the mesh step adds
+        # <car>.glb next to it. Default <dir>/cars.
+        outdir = Path(args.outdir) if args.outdir else Path(args.dir) / "cars"
         outdir.mkdir(parents=True, exist_ok=True)
         print(f"\n  Batch mode: {len(cars)} cars -> {outdir}")
         ok = err = invalid = 0
         for car in cars:
             try:
                 svj = convert_car(car, args.dir)
-                out_path = outdir / f"{car}.svj.json"
+                out_path = outdir / car / f"{car}.svj.json"
                 write_svj(svj, str(out_path), indent=indent)
                 problems = validate_svj(svj)
                 if problems:
                     invalid += 1
-                    print(f"  OK {car} -> {out_path.name}  "
+                    print(f"  OK {car} -> {car}/{out_path.name}  "
                           f"[SCHEMA: {len(problems)} errors, first: {problems[0]}]")
                 else:
-                    print(f"  OK {car} -> {out_path.name}")
+                    print(f"  OK {car} -> {car}/{out_path.name}")
                 ok += 1
             except Exception as exc:
                 print(f"  FAIL {car}: {exc}")

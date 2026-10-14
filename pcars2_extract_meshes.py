@@ -20,17 +20,17 @@ Usage
 -----
   # Convert a single car
   python pcars2_extract_meshes.py --game "E:/SteamLibrary/.../Project CARS 2" \\
-    --car toyota_gt86 --svj-dir _pcars2/svj_output --glb-dir _pcars2/meshes
+    --car toyota_gt86 --cars-dir _pcars2/cars
 
   # Batch: all cars whose SVJ file exists
   python pcars2_extract_meshes.py --game "E:/SteamLibrary/.../Project CARS 2" \\
-    --all --svj-dir _pcars2/svj_output --glb-dir _pcars2/meshes \\
+    --all --cars-dir _pcars2/cars \\
     --work-dir _pcars2/mesh_work
 
 Output
 ------
-  <glb-dir>/<car_name>.glb          — GLB mesh file
-  <svj-dir>/<car_name>.svj.json     — updated with assets.meshes reference
+  <cars-dir>/<car>/<car>.glb        — GLB mesh file
+  <cars-dir>/<car>/<car>.svj.json   — updated with assets.meshes reference
 
 Notes
 -----
@@ -339,8 +339,7 @@ def process_car(
     game_dir:    str,
     pcarstools:  str,
     work_dir:    str,
-    glb_dir:     str,
-    svj_dir:     Optional[str],
+    cars_dir:    str,
     cleanup:     bool = True,
 ) -> bool:
     """
@@ -381,12 +380,13 @@ def process_car(
     # Use the shallowest directory containing .meb files
     meb_dir = min(meb_dirs, key=lambda p: len(p.parts))
 
-    glb_out = Path(glb_dir) / f"{car_name}.glb"
-    Path(glb_dir).mkdir(parents=True, exist_ok=True)
+    car_out = Path(cars_dir) / car_name
+    glb_out = car_out / f"{car_name}.glb"
+    car_out.mkdir(parents=True, exist_ok=True)
 
     # Texture search: car-specific dirs + common textures (if extracted)
     tex_dirs = [str(meb_dir), str(meb_dir.parent), str(car_work)]
-    common_tex = Path(glb_dir).parent / "common_textures"
+    common_tex = Path(cars_dir).parent / "common_textures"
     if common_tex.is_dir():
         tex_dirs.append(str(common_tex))
 
@@ -405,18 +405,12 @@ def process_car(
         print(f"    VHF: not found or parse failed")
 
     # ── 6. Update SVJ ────────────────────────────────────────────────────────
-    if svj_dir:
-        svj_path = Path(svj_dir) / f"{car_name}.svj.json"
-        if svj_path.is_file():
-            # Use relative URI from the SVJ output folder to the GLB.
-            # Falls back to an absolute path if GLB/SVJ live on different drives
-            # (os.path.relpath raises ValueError in that case on Windows).
-            try:
-                glb_rel = os.path.relpath(str(glb_out), svj_dir).replace("\\", "/")
-            except ValueError:
-                glb_rel = str(glb_out.resolve()).replace("\\", "/")
-            _update_svj_assets(str(svj_path), car_name, glb_rel, vhf_data, svj_nodes)
-            print(f"    SVJ updated: assets.meshes → {glb_rel}")
+    svj_path = car_out / f"{car_name}.svj.json"
+    if svj_path.is_file():
+        # The GLB sits next to the SVJ, so the URI is just its file name
+        glb_rel = glb_out.name
+        _update_svj_assets(str(svj_path), car_name, glb_rel, vhf_data, svj_nodes)
+        print(f"    SVJ updated: assets.meshes -> {glb_rel}")
 
     # ── 7. Cleanup ───────────────────────────────────────────────────────────
     if cleanup:
@@ -442,12 +436,12 @@ Examples
   # Single car
   python pcars2_extract_meshes.py \\
     --game "E:/SteamLibrary/steamapps/common/Project CARS 2" \\
-    --car toyota_gt86 --svj-dir _pcars2/svj_output --glb-dir _pcars2/meshes
+    --car toyota_gt86 --cars-dir _pcars2/cars
 
   # All cars (will take 15-40 minutes)
   python pcars2_extract_meshes.py \\
     --game "E:/SteamLibrary/steamapps/common/Project CARS 2" \\
-    --all --svj-dir _pcars2/svj_output --glb-dir _pcars2/meshes
+    --all --cars-dir _pcars2/cars
         """
     )
     ap.add_argument("--game", required=True,
@@ -456,12 +450,11 @@ Examples
                     help="Single car name to process (e.g. toyota_gt86)")
     ap.add_argument("--all", action="store_true",
                     help="Process all cars with existing SVJ files")
-    ap.add_argument("--svj-dir", default=None,
-                    help="Directory containing .svj.json files (also updated with GLB URIs)")
-    ap.add_argument("--glb-dir", default=None,
-                    help="Output directory for .glb files (default: <svj-dir>/../meshes)")
+    ap.add_argument("--cars-dir", default="_pcars2/cars",
+                    help="Output root: one folder per car holding <car>.svj.json and <car>.glb "
+                         "(default: _pcars2/cars)")
     ap.add_argument("--work-dir", default=None,
-                    help="Temporary workspace for BFF extraction (default: <glb-dir>/../mesh_work)")
+                    help="Temporary workspace for BFF extraction (default: <cars-dir>/../mesh_work)")
     ap.add_argument("--tools-dir", default=None,
                     help="Directory containing PCarsTools.exe (auto-detected if omitted)")
     ap.add_argument("--no-cleanup", action="store_true",
@@ -497,27 +490,23 @@ Examples
     print(f"PCarsTools: {pcarstools}")
 
     # ── Resolve directories ───────────────────────────────────────────────────
-    svj_dir = str(Path(args.svj_dir)) if args.svj_dir else None
-    glb_dir = str(Path(args.glb_dir)) if args.glb_dir else (
-        str(Path(svj_dir).parent / "meshes") if svj_dir else "meshes"
-    )
+    cars_dir = str(Path(args.cars_dir))
     work_dir = str(Path(args.work_dir)) if args.work_dir else (
-        str(Path(glb_dir).parent / "mesh_work")
+        str(Path(cars_dir).parent / "mesh_work")
     )
     game_dir = str(Path(args.game))
 
     print(f"Game     : {game_dir}")
-    print(f"SVJ dir  : {svj_dir or '(none — SVJ not updated)'}")
-    print(f"GLB dir  : {glb_dir}")
+    print(f"Cars dir : {cars_dir}")
     print(f"Work dir : {work_dir}")
 
     cleanup = not args.no_cleanup
 
     # ── Build car list ────────────────────────────────────────────────────────
     if args.all:
-        if not svj_dir or not Path(svj_dir).is_dir():
-            ap.error("--all requires --svj-dir pointing at an existing directory")
-        cars = sorted(Path(svj_dir).glob("*.svj.json"))
+        if not Path(cars_dir).is_dir():
+            ap.error("--all requires --cars-dir pointing at the folder the SVJ files were written to")
+        cars = sorted(Path(cars_dir).glob("*/*.svj.json"))
         car_names = [p.stem.replace(".svj", "") for p in cars]
         print(f"\nBatch mode: {len(car_names)} cars")
     elif args.car:
@@ -545,8 +534,8 @@ Examples
                 if cleanup: _cleanup_dir(str(car_work))
                 continue
             vhf_data = _parse_vhf(str(car_work))
-            if vhf_data and svj_dir:
-                svj_path = Path(svj_dir) / f"{car}.svj.json"
+            if vhf_data:
+                svj_path = Path(cars_dir) / car / f"{car}.svj.json"
                 if svj_path.is_file():
                     # Keep existing assets.meshes; only update chassis geometry
                     with open(svj_path, encoding="utf-8") as f:
@@ -567,8 +556,7 @@ Examples
                 game_dir=game_dir,
                 pcarstools=pcarstools,
                 work_dir=work_dir,
-                glb_dir=glb_dir,
-                svj_dir=svj_dir,
+                cars_dir=cars_dir,
                 cleanup=cleanup,
             )
             if success:

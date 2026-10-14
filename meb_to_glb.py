@@ -535,7 +535,7 @@ def _make_glb_from_mebs(
         try:
             m = MebFile(meb_path)
         except Exception as exc:
-            print(f"    [WARN] {part_name}: parse error — {exc}")
+            print(f"    [WARN] {part_name}: parse error - {exc}")
             continue
 
         pos  = m.positions()
@@ -716,7 +716,7 @@ def convert_car_to_glb(
     vhf = _find_vhf(meb_dir)
     transforms = parse_vhf_transforms(vhf) if vhf else {}
     if not transforms:
-        print(f"  [WARN] {car_name}: no .vhf hierarchy found — parts not positioned")
+        print(f"  [WARN] {car_name}: no .vhf hierarchy found - parts not positioned")
 
     g = _make_glb_from_mebs(meb_files, car_name, texture_dirs, transforms)
     if g is None:

@@ -41,7 +41,7 @@ SVJ-relevant data category is present.
   - `.edfbin` (212) — **Engine** (torque curve)        → SVJ drivetrain.engine
   - `.cdfbin` (227) — **Chassis** (mass/CG/aero/geom)   → SVJ chassis + aerodynamics
   - `.gdfbin` (180) — **Gearbox** (ratios/final/diff)   → SVJ drivetrain.gearbox/diff
-  - `.sdfbin` (145) — **Suspension** (springs/dampers)  → SVJ suspension
+  - `.sdfbin` (145) — **Suspension** (springs/dampers/links) → SVJ suspension
   - `.tbfbin` (46), `.bbfbin` (21) — brakes/body/turbo-related
 - `Pakfiles/PHYSICSBOOTFLOW.bff` (tiny) — boot flow only.
 
@@ -59,6 +59,21 @@ SVJ-relevant data category is present.
   (e.g. `8B 0A B7 71`), not plaintext. Need a hash→name map (community `.edfbin`↔text
   tools already exist) OR positional/structural decoding (values are readable floats, so
   this works for curves/tables).
+
+### `.sdfbin` suspension link geometry
+Read from the raw primary block. The record parser can't be used here, because it splits
+record bodies at any `0x24` byte, which can fall inside a float.
+- Link: `8a1e5909 <corner byte> 4209feea a302 <inboard xyz f32>` and, 18 bytes later,
+  `5a44c7e0 a302 <outboard xyz f32>`. Links that share an outboard point form an A-arm.
+- Standalone `5a44c7e0 a302 <xyz>` with no inboard point: above the wheel centre these
+  are strut top mounts.
+- Axle reference: `42444209 feea2302 <x f32> 00 <z f32>`, one per spring mount. The most
+  negative z is the front axle, the most positive z the rear.
+- Frame: X left, Y up, Z rear. Y is relative to the wheel centre. Fore/aft, links are
+  authored around the axle reference z, which can be up to ~0.5 m off the `.vdfm` wheel
+  centre (Caterham 620R, Radical SR3), so each axle is shifted by (vdfm z − reference z).
+  Both points were checked against the game's suspension meshes: the joints then sit
+  within a few millimetres of mesh vertices.
 
 ## Constraints / honesty
 - Requires the user's own legitimate install (offline, static unpack — not a runtime or

@@ -49,10 +49,10 @@ python pc2_to_svj_gui.py
 # Physics -> SVJ (expects physics already extracted into _pcars2/out)
 python pcars2_to_svj.py --dir _pcars2/out --list
 python pcars2_to_svj.py --dir _pcars2/out --car toyota_gt86 --out gt86.svj.json
-python pcars2_to_svj.py --dir _pcars2/out --all --outdir _pcars2/svj_output
+python pcars2_to_svj.py --dir _pcars2/out --all --outdir _pcars2/cars
 
 # 3D models -> GLB, and link each one into its SVJ file
-python pcars2_extract_meshes.py --game "<path to Project CARS 2>" --all --svj-dir _pcars2/svj_output --glb-dir _pcars2/meshes
+python pcars2_extract_meshes.py --game "<path to Project CARS 2>" --all --cars-dir _pcars2/cars
 ```
 
 To extract the physics archives without the GUI, see [PCARS2_EXTRACTION_NOTES.md](PCARS2_EXTRACTION_NOTES.md).
@@ -62,8 +62,8 @@ To extract the physics archives without the GUI, see [PCARS2_EXTRACTION_NOTES.md
 ```
 _pcars2/
   out/            unpacked physics archives
-  svj_output/     <car>.svj.json
-  meshes/         <car>.glb
+  cars/
+    <car>/        <car>.svj.json and <car>.glb, side by side
 ```
 
 Run the physics conversion again after extracting models and the mesh links are kept.
@@ -79,9 +79,10 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Mass, drivetrain (RWD/AWD/FWD), displacement, front/rear weight split | car-select spec sheet (`.mrdf`) |
 | Wheel centres, wheelbase, track, tyre width and radius | vehicle descriptor (`.vdfm`) |
 | Spring rates | suspension file (`.sdfbin`) |
+| Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |
 | Drag coefficient | chassis file (`.cdfbin`); tentative |
-| **Estimated:** suspension geometry other than the wheel centre, damper curves for road cars, Pacejka B, brakes, steering, CG height, engine position of RWD cars, differential type | — |
+| **Estimated:** suspension geometry where it couldn't be decoded, damper curves for road cars, Pacejka B, brakes, steering, CG height, engine position of RWD cars, differential type | — |
 
 Cars that don't ship their own physics file (for example, many have no tyre file of their own) fall back to the file of a true base variant of the same car when one exists, such as `toyota_gt86_rb` using `toyota_gt86`. Otherwise they use defaults. A different model's data is never borrowed.
 
@@ -93,7 +94,7 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 
 - Tyre models have inverted normals in the game's own source data, so tyres may look flat-shaded.
 - Textures are capped at 512 px. Specular maps are approximated: gloss becomes roughness, and the specular colour uses the optional `KHR_materials_specular` extension as a reflectance mask.
-- Suspension links in the SVJ files are representative estimates. The game's suspension files do contain real link geometry, which isn't decoded yet.
+- Suspension geometry comes from the game's link records. The converter infers `system_type` and link names from the layout: double wishbone, MacPherson, multi-link, trailing arm or semi-trailing arm. Some strut cars are stored by the game as a long virtual upper arm, and those links carry a `_note`. Live axles, unusual layouts and the 65 cars without a suspension file of their own keep a representative double-wishbone estimate, flagged `_est`.
 
 ## Project layout
 
