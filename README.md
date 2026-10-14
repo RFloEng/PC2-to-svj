@@ -88,7 +88,7 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 
 **Coordinates** follow SVJ's SAE J670 convention: X forward, Y right, Z down, origin at the front-axle midpoint on the ground. Units are SI, except engine displacement, which the SVJ spec gives in litres.
 
-**3D models** use glTF's Y-up convention. Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game. Parts are grouped under nodes named by the SVJ naming convention (`SVJ::body::chassis`, `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel`, …), and the SVJ file binds only the nodes its GLB actually contains.
+**3D models** follow SVJ spec 22.4: glTF Y-up, +X right, -Z forward, with the origin at the front-axle midpoint on the ground, so a GLB lines up with the SVJ's hardpoints without any extra transform. The game's mesh space is left-handed, so the conversion mirrors it (and reverses triangle winding). Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game. Parts are grouped under nodes named by the SVJ naming convention (`SVJ::body::chassis`, `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel`, …), and the SVJ file binds only the nodes its GLB actually contains.
 
 ## Known limitations
 

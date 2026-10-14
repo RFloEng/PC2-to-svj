@@ -529,6 +529,12 @@ def _make_glb_from_mebs(
         accessors.append(acc)
         return len(accessors) - 1
 
+    # Front axle (raw z, negative = forward): the GLB origin is moved there so
+    # it matches SVJ's origin (front-axle midpoint on the ground).
+    front_z = [xf[0][2] for name, xf in node_transforms.items()
+               if re.search(r"_wheel_(lf|rf)(?:_|$)", name)]
+    z_front = sum(front_z) / len(front_z) if front_z else 0.0
+
     ok_count = 0
     for meb_path in meb_paths:
         part_name = Path(meb_path).stem
@@ -547,17 +553,18 @@ def _make_glb_from_mebs(
             continue
 
         # ── Vertex data (shared across all submesh primitives) ────────────────
-        # pCARS2 mesh space is Y-up but faces the opposite way from glTF's
-        # convention, so a 180 deg yaw (negate X and Z, keep Y) is needed.
-        # This must be a proper rotation (det=+1), not a single-axis mirror:
-        # a mirror (e.g. negating Z alone, as this used to do) flips triangle
-        # winding relative to the transformed normals, which is why meshes
-        # came out flat/inconsistently shaded — doubleSided materials hid the
-        # backface-culling symptom but not the resulting lighting artifacts.
+        # pCARS2 mesh space is Y-up, X to the LEFT, Z to the rear: a left-handed
+        # frame (checked on the driver's side: left-hand-drive cars have the
+        # steering wheel at +X, the British right-hand-drive ones at -X).
+        # glTF as SVJ uses it (spec 22.4) is right-handed, +X right, -Z forward,
+        # so the conversion is a mirror: negate X. That mirror also reverses
+        # triangle winding, so indices are reversed below and normals get the
+        # same X flip. Z keeps its sign (rear is +Z in both frames). The origin shift
+        # to the front axle is applied on the part nodes, not the vertices.
         pos_np = np.array(pos, dtype=np.float32)
         pos_gl = np.column_stack([-pos_np[:, 0],
                                     pos_np[:, 1],
-                                   -pos_np[:, 2]]).astype(np.float32)
+                                    pos_np[:, 2]]).astype(np.float32)
         bv_pos = _add_bv(pos_gl.tobytes(), gltf.ARRAY_BUFFER)
         acc_pos = _add_acc(bv_pos, gltf.FLOAT, len(pos), "VEC3",
                            pos_gl.min(axis=0).tolist(),
@@ -568,7 +575,7 @@ def _make_glb_from_mebs(
             nrm_np = np.array(nrm, dtype=np.float32)
             nrm_gl = np.column_stack([-nrm_np[:, 0],
                                         nrm_np[:, 1],
-                                       -nrm_np[:, 2]]).astype(np.float32)
+                                        nrm_np[:, 2]]).astype(np.float32)
             bv_nrm = _add_bv(nrm_gl.tobytes(), gltf.ARRAY_BUFFER)
             acc_nrm = _add_acc(bv_nrm, gltf.FLOAT, len(nrm), "VEC3")
 
@@ -588,7 +595,8 @@ def _make_glb_from_mebs(
                 continue
             # Ensure triangle-aligned length
             n = (len(face_list) // 3) * 3
-            idx_np = np.array(face_list[:n], dtype=np.uint16)
+            idx_np = np.ascontiguousarray(
+                np.array(face_list[:n], dtype=np.uint16).reshape(-1, 3)[:, ::-1]).ravel()
             bv_idx = _add_bv(idx_np.tobytes(), gltf.ELEMENT_ARRAY_BUFFER)
             acc_idx = _add_acc(bv_idx, gltf.UNSIGNED_SHORT, n, "SCALAR")
 
@@ -614,14 +622,17 @@ def _make_glb_from_mebs(
         xf = node_transforms.get(part_name.lower())
         if xf:
             (tx, ty, tz), (qx, qy, qz, qw), s = xf
-            # Same 180 deg yaw as the vertex data (negate X and Z): conjugating
-            # by it maps translation (x,y,z)->(-x,y,-z), quaternion axis likewise.
-            if any(abs(v) > 1e-9 for v in (tx, ty, tz)):
-                node.translation = [-tx, ty, -tz]
+            # Conjugating a placement by the X mirror: translation x flips, and
+            # a rotation about axis (ax,ay,az) becomes one about (ax,-ay,-az).
+            t = [-tx, ty, tz - z_front]
+            if any(abs(v) > 1e-9 for v in t):
+                node.translation = t
             if any(abs(v) > 1e-9 for v in (qx, qy, qz)):
-                node.rotation = [-qx, qy, -qz, qw]
+                node.rotation = [qx, -qy, -qz, qw]
             if abs(s - 1.0) > 1e-9:
                 node.scale = [s, s, s]
+        elif abs(z_front) > 1e-9:
+            node.translation = [0.0, 0.0, -z_front]
         nodes.append(node)
         ok_count += 1
         tex_info = f"  ({len([p for p in primitives if p.material is not None])} textured)" if tex_map else ""
