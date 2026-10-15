@@ -79,7 +79,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Mass, drivetrain (RWD/AWD/FWD), displacement, front/rear weight split | car-select spec sheet (`.mrdf`) |
 | Wheel centres, wheelbase, track, tyre width and radius | vehicle descriptor (`.vdfm`) |
 | Gearbox type, clutch type and torque capacity, crankshaft inertia, AWD diff layout (205 of 212 cars) | driveline setup (`driveline.rg`), matched by car name |
-| Spring rates | suspension file (`.sdfbin`) |
+| Spring rates | suspension file (`.sdfbin`); where it has none, derived from car mass and a typical ride frequency (flagged `_est`) |
 | Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |
 | Drag coefficient | chassis file (`.cdfbin`); tentative |
@@ -95,7 +95,7 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 
 - Tyre models have inverted normals in the game's own source data, so tyres may look flat-shaded.
 - Textures are capped at 512 px. Specular maps are approximated: gloss becomes roughness, and the specular colour uses the optional `KHR_materials_specular` extension as a reflectance mask.
-- Suspension geometry comes from the game's link records. The converter infers `system_type` and link names from the layout: double wishbone, MacPherson, multi-link, trailing arm or semi-trailing arm. Some strut cars are stored by the game as a long virtual upper arm, and those links carry a `_note`. Live axles, unusual layouts and the 65 cars without a suspension file of their own keep a representative double-wishbone estimate, flagged `_est`.
+- Suspension geometry comes from the game's link records. The converter infers `system_type` and link names from the layout: double wishbone, MacPherson, multi-link, trailing arm or semi-trailing arm. Some strut cars are stored by the game as a long virtual upper arm, and those links carry a `_note`. Corners the game data leaves one link short get a flagged estimated toe or upper link so every corner has the 5 constraints it needs; trailing and semi-trailing arms end on `wheel_center`; a MacPherson strut runs from its top mount to an estimated lower point on the upright, and its spring and damper mounts follow it. Live axles, torsion beams, unusual layouts and the 65 cars without a suspension file of their own keep a representative double-wishbone estimate, flagged `_est`.
 
 ## Project layout
 

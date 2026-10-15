@@ -1123,7 +1123,7 @@ _MAX_JOINT_REACH = 0.45   # m: an upright joint farther than this from its wheel
 
 
 def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
-                     ) -> Dict[str, Tuple[str, Dict[str, List[float]], List[Dict]]]:
+                     ) -> Dict[str, Tuple[str, Dict[str, List[float]], List[Dict], Dict]]:
     """
     Build SVJ suspension topology per corner from the sdfbin link geometry.
 
@@ -1174,7 +1174,7 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
         if p[1] > 0.1 and st not in tops:          # above the wheel centre
             tops[st] = to_sae(p, st)
 
-    out: Dict[str, Tuple[str, Dict[str, List[float]], List[Dict]]] = {}
+    out: Dict[str, Tuple[str, Dict[str, List[float]], List[Dict], Dict]] = {}
     for st, pairs in corners.items():
         wc = vdfm[st]
         if any(math.hypot(o[0] - wc[0], o[1] - wc[1]) > _MAX_JOINT_REACH for _, o in pairs):
@@ -1197,6 +1197,8 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
             a, b = arms[0][1]
             axis = math.degrees(math.atan2(abs(a[0] - b[0]), abs(a[1] - b[1])))
             if axis < 10.0:
+                if n_links == 1:
+                    continue   # a lone lateral-axis arm is a live axle's link; keep the estimate
                 system = "trailing_arm"
             elif axis < 60.0:
                 system = "semi_trailing_arm"
@@ -1204,6 +1206,15 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
                 continue
         else:
             continue
+
+        if system == "macpherson":
+            # A strut top that coincides with an upright joint, or an arm that
+            # spans the centreline, is not a real strut: it is a beam axle
+            # whose links the sdfbin describes differently. Keep the estimate.
+            top = tops[st]
+            if (any(math.dist(top, o) < 0.05 for o, _ in singles)
+                    or any(p[1] * wc[1] < 0 for _, v in arms for p in v)):
+                continue
 
         hp: Dict[str, List[float]] = {"wheel_center": [round(v, 4) for v in wc]}
         links: List[Dict] = []
@@ -1231,7 +1242,13 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
             add("upper_wishbone", "arm", arms[0][1], arms[0][0], "upper_ball_joint")
             add("lower_wishbone", "arm", arms[1][1], arms[1][0], "lower_ball_joint")
         elif system in ("trailing_arm", "semi_trailing_arm"):
-            add(system, "arm", arms[0][1], arms[0][0], f"{system}_outer")
+            # Spec 9.2.1: the arm carries the hub, so it ends on wheel_center.
+            links.append({"name": system, "type": "arm",
+                          "inboard_points": arms[0][1],
+                          "outboard_ref": "hardpoints.wheel_center",
+                          "joint_type": "spherical",
+                          "inboard_joint_type": "revolute"})
+            used.add(system)
         elif len(arms) == 1:
             upper = arms[0][0][2] < wc[2] and system != "macpherson"
             add("upper_wishbone" if upper else "lower_wishbone", "arm", arms[0][1], arms[0][0],
@@ -1239,6 +1256,11 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
 
         # Single links: the one reaching farthest fore/aft of the wheel centre
         # is the steering tie rod (front) or toe link (rear).
+        dropped: List[str] = []
+        if system in ("trailing_arm", "semi_trailing_arm") and singles:
+            # The arm already fixes the hub; a toe link would over-constrain it.
+            dropped += [f"toe-link-like rod outboard {o} inboard {i}" for o, i in singles]
+            singles = []
         if singles:
             singles.sort(key=lambda s: -abs(s[0][0] - wc[0]))
             toe = singles.pop(0)
@@ -1246,6 +1268,11 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
                 add("tie_rod", "rod", [toe[1]], toe[0], "tie_rod_end")
             else:
                 add("toe_link", "rod", [toe[1]], toe[0], "toe_link_outer")
+        if system == "macpherson" and singles:
+            # arm (2) + toe (1) + strut (2) already fixes the hub; a further
+            # rod would over-constrain it.
+            dropped += [f"extra rod outboard {o} inboard {i}" for o, i in singles]
+            singles = []
         for outb, inb in singles:
             along = abs(inb[0] - outb[0]) > abs(inb[1] - outb[1])
             if along:
@@ -1263,10 +1290,56 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
         if system == "macpherson":
             top = tops[st]
             hp["strut_top"] = top
+            # Strut lower end on the upright: not in the game data. Put it on
+            # the line from the lower ball joint to the top mount, just above
+            # the wheel centre, so the strut axis stays plausible.
+            lbj = hp.get("lower_ball_joint", wc)
+            dz = top[2] - lbj[2]
+            t = (wc[2] - 0.04 - lbj[2]) / dz if abs(dz) > 1e-6 else 0.4
+            t = min(max(t, 0.25), 0.7)
+            hp["strut_lower"] = [round(lbj[i] + t * (top[i] - lbj[i]), 4) for i in range(3)]
             links.append({"name": "strut", "type": "strut", "inboard_points": [top],
-                          "outboard_ref": "hardpoints.strut_top",
-                          "joint_type": "translational", "inboard_joint_type": "fixed"})
-        out[st] = (system, hp, links)
+                          "outboard_ref": "hardpoints.strut_lower",
+                          "joint_type": "translational", "inboard_joint_type": "fixed",
+                          "_note": "strut_top decoded from the sdfbin; strut_lower is an "
+                                   "estimate on the line from lower_ball_joint to strut_top."})
+
+        # A corner needs 5 constraints (arm 2, rod 1, strut 2). Where the game
+        # data leaves one out, add a flagged estimate.
+        def n_cons(ls: List[Dict]) -> int:
+            return sum({"arm": 2, "strut": 2}.get(l["type"], 1) for l in ls)
+        if n_cons(links) == 4:
+            names = [l["name"] for l in links]
+            uppers = [n for n in names if n.startswith("upper_link_")]
+            has_toe = any(n in ("tie_rod", "toe_link") for n in names)
+            if len(uppers) == 1:
+                src = next(l for l in links if l["name"] == uppers[0])
+                ob = hp[src["outboard_ref"].split(".", 1)[1]]
+                ib = src["inboard_points"][0]
+                flip = lambda q: [round(2 * wc[0] - q[0], 4), q[1], q[2]]
+                nm = "upper_link_front" if uppers[0].endswith("rear") else "upper_link_rear"
+                hp[f"{nm}_outer"] = flip(ob)
+                links.append({"name": nm, "type": "rod", "inboard_points": [flip(ib)],
+                              "outboard_ref": f"hardpoints.{nm}_outer",
+                              "joint_type": "spherical", "inboard_joint_type": "spherical",
+                              "_est": True,
+                              "_note": f"Missing from the game data; mirrored from {uppers[0]} "
+                                       "about the wheel-centre X."})
+            elif not has_toe:
+                side = 1.0 if wc[1] >= 0 else -1.0
+                key = "tie_rod_end" if front else "toe_link_outer"
+                z = round(hp.get("lower_ball_joint", wc)[2] - 0.02, 4)
+                hp[key] = [round(wc[0] - 0.10, 4), round(wc[1] - side * 0.08, 4), z]
+                links.append({"name": "tie_rod" if front else "toe_link", "type": "rod",
+                              "inboard_points": [[round(wc[0] - 0.10, 4),
+                                                  round(side * max(abs(wc[1]) - 0.40, 0.10), 4), z]],
+                              "outboard_ref": f"hardpoints.{key}",
+                              "joint_type": "spherical", "inboard_joint_type": "spherical",
+                              "_est": True,
+                              "_note": "No toe/steering link in the game data for this corner; "
+                                       "estimated behind the wheel centre so the wheel is located."})
+        extra = {"_dropped_links": dropped} if dropped else {}
+        out[st] = (system, hp, links, extra)
 
     # Keep an axle only when both of its corners decoded (avoids half-real axles)
     for axle in ("F", "R"):
@@ -1284,7 +1357,9 @@ _DEFAULT_WHEEL_R   = 0.33
 def build_suspension(sf_sdf: Optional[ShCBFile],
                      sf_hdt: Optional[ShCBFile],
                      car: str,
-                     vdfm: Optional[Dict] = None) -> Dict:
+                     vdfm: Optional[Dict] = None,
+                     mass_kg: Optional[float] = None,
+                     rear_fraction: Optional[float] = None) -> Dict:
     """
     Build SVJ suspension as FL/FR/RL/RR per-corner dicts.
 
@@ -1302,12 +1377,27 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
     """
     # Real spring rates from sdfbin block structure (N/m)
     sdf_physics = _parse_sdf_physics(sf_sdf)
-    front_spring = sdf_physics.get("front_spring_Nm", 55_000.0)
-    rear_spring  = sdf_physics.get("rear_spring_Nm",  50_000.0)
+    # Where the sdfbin has no rate, derive one from the corner's sprung mass
+    # and a typical ride frequency (flagged), not one number for every car.
+    mass = mass_kg or _DEFAULT_MASS
+    rf = rear_fraction if rear_fraction else 0.5
+    def _ride_rate(axle_fraction: float, freq_hz: float) -> float:
+        m_corner = mass * axle_fraction / 2 * 0.88      # ~12 % unsprung
+        return round(m_corner * (2 * math.pi * freq_hz) ** 2, -2)
+    spring_src = {}
+    if "front_spring_Nm" in sdf_physics:
+        front_spring, spring_src["front"] = sdf_physics["front_spring_Nm"], "pcars2_sdfbin"
+    else:
+        front_spring, spring_src["front"] = _ride_rate(1 - rf, 1.5), "estimated_ride_frequency"
+    if "rear_spring_Nm" in sdf_physics:
+        rear_spring, spring_src["rear"] = sdf_physics["rear_spring_Nm"], "pcars2_sdfbin"
+    else:
+        rear_spring, spring_src["rear"] = _ride_rate(rf, 1.7), "estimated_ride_frequency"
 
     # Damper: pCARS2 stores ~777 Ns/m reference in sdfbin for road cars.
     # Race cars with hash=063ea245 have explicit per-car values.
     front_damper = rear_damper = 777.0
+    damper_real = False
     if sf_sdf is not None:
         for h in ("063ea245", "06bea245"):
             r_damp = sf_sdf.get_one(h)
@@ -1323,6 +1413,7 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                     damp_candidates.sort()
                     mid = damp_candidates[len(damp_candidates) // 2]
                     front_damper = rear_damper = round(mid, 1)
+                    damper_real = True
                 break
 
     real_topo = _real_topologies(parse_sdf_links(sf_sdf), vdfm)
@@ -1359,8 +1450,9 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             tire_src_note = tire["_note"]
 
         if tag in real_topo:
-            system_type, hardpoints, links = real_topo[tag]
+            system_type, hardpoints, links, topo_notes = real_topo[tag]
             topo_extra = {
+                **topo_notes,
                 "_wheel_center_source": wc_source,
                 "_topology_source": "pcars2_sdfbin",
                 "_note": (
@@ -1401,6 +1493,39 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             wheel_dict["_section_width"] = section_width
             wheel_dict["_tire_source"]   = "pcars2_vdfm"
 
+        strut = next((l for l in links if l["type"] == "strut"), None)
+        spring_d = {
+            "type":    "coil",
+            "rate":    spring,
+            "_source": spring_src[axle],
+        }
+        damper_d = {
+            "type": "twin_tube",
+            # [velocity_m_s, force_N] pairs; force = coefficient × velocity
+            "bump_curve":    [[0.0, 0.0],
+                              [0.5, round(damper * 0.5, 1)],
+                              [1.0, round(damper, 1)]],
+            "rebound_curve": [[0.0, 0.0],
+                              [0.5, round(damper * 0.75, 1)],
+                              [1.0, round(damper * 1.5, 1)]],
+            "_source": "pcars2_sdfbin",
+            "_note":   "pCARS2 stores ~777 Ns/m reference constant in sdfbin (road cars). "
+                       "Race cars with hash=063ea245 use explicit per-car values.",
+        }
+        if spring_src[axle] != "pcars2_sdfbin":
+            spring_d["_est"] = True
+            spring_d["_note"] = ("No spring rate in the sdfbin: derived from the car mass, "
+                                 "weight split and a typical ride frequency "
+                                 "(1.5 Hz front, 1.7 Hz rear).")
+        if not damper_real:
+            damper_d["_est"] = True
+        if strut is not None:
+            # On a strut the spring and damper sit on the strut axis.
+            mounts = {"inboard_mount": strut["inboard_points"][0],
+                      "outboard_mount": hardpoints["strut_lower"]}
+            spring_d.update(mounts)
+            damper_d.update(mounts)
+
         return {
             "topology": {
                 "system_type": system_type,
@@ -1414,24 +1539,8 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                 **topo_extra,
             },
             "wheel": wheel_dict,
-            "spring": {
-                "type":    "coil",
-                "rate":    spring,
-                "_source": "pcars2_sdfbin" if sdf_physics else "default",
-            },
-            "damper": {
-                "type": "twin_tube",
-                # [velocity_m_s, force_N] pairs; force = coefficient × velocity
-                "bump_curve":    [[0.0, 0.0],
-                                  [0.5, round(damper * 0.5, 1)],
-                                  [1.0, round(damper, 1)]],
-                "rebound_curve": [[0.0, 0.0],
-                                  [0.5, round(damper * 0.75, 1)],
-                                  [1.0, round(damper * 1.5, 1)]],
-                "_source": "pcars2_sdfbin",
-                "_note":   "pCARS2 stores ~777 Ns/m reference constant in sdfbin (road cars). "
-                           "Race cars with hash=063ea245 use explicit per-car values.",
-            },
+            "spring": spring_d,
+            "damper": damper_d,
             "brake": {
                 "disc": {
                     "type":           "vented" if axle == "front" else "solid",
@@ -1496,6 +1605,7 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
         },
         "alignment_convention":  "relative_to_centerline",
         "_converter":            "pCARS2->SVJ Converter v0.3",
+        "x_converter_repo":      "https://github.com/RFloEng/PC2-to-svj",
         "_source_game":          "Project CARS 2",
         "_car_name":             car,
         "_source_files":         src,
@@ -1637,7 +1747,9 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     else:
         print("  [WARN] driveline: no entry for this car - gearbox type and clutch use defaults")
 
-    suspension = build_suspension(sf_sdf, sf_hdt, car, vdfm=vdfm_data)
+    suspension = build_suspension(sf_sdf, sf_hdt, car, vdfm=vdfm_data,
+                                  mass_kg=mrdf_data.get("mass_kg"),
+                                  rear_fraction=mrdf_data.get("rear_weight_fraction"))
 
     # Build top-level tires section from suspension corner data
     fl_wheel = suspension.get("FL", {}).get("wheel", {})
