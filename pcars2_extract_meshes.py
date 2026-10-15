@@ -59,6 +59,7 @@ _spec = importlib.util.spec_from_file_location("meb_to_glb", str(_MEB2GLB_PATH))
 _meb2glb_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_meb2glb_mod)
 convert_car_to_glb = _meb2glb_mod.convert_car_to_glb
+parse_default_livery = _meb2glb_mod.parse_default_livery
 
 _spec_n = importlib.util.spec_from_file_location("pcars2_names", str(_HERE / "pcars2_names.py"))
 _names_mod = importlib.util.module_from_spec(_spec_n)
@@ -386,11 +387,29 @@ def process_car(
 
     # Texture search: car-specific dirs + common textures (if extracted)
     tex_dirs = [str(meb_dir), str(meb_dir.parent), str(car_work)]
-    common_tex = Path(cars_dir).parent / "common_textures"
-    if common_tex.is_dir():
-        tex_dirs.append(str(common_tex))
+    for common_tex in (Path(cars_dir).parent / "common_textures",
+                       _HERE / "_pcars2" / "common_textures"):
+        if common_tex.is_dir():
+            tex_dirs.append(str(common_tex))
+            break
 
-    svj_nodes = convert_car_to_glb(car_name, str(meb_dir), str(glb_out), tex_dirs)
+    # Default livery: the .rcf lists per-livery material/texture replacements;
+    # the replacement materials and textures live in <car>_Livery.bff.
+    livery = None
+    rcfs = [r for r in car_work.rglob("*.rcf") if not r.stem.lower().endswith("_hr")]
+    if rcfs:
+        livery = parse_default_livery(rcfs[0])
+    livery_bff = bff.with_name(bff.stem + "_Livery.bff")
+    if livery and livery_bff.is_file():
+        livery_work = Path(work_dir) / f"{car_name}_livery"
+        if _run_pcarstools(pcarstools, str(livery_bff), game_dir, str(livery_work)):
+            tex_dirs.append(str(livery_work))
+            print(f"    Livery: {livery['name']} (#{livery['id']})")
+    elif livery:
+        print(f"    [WARN] no {livery_bff.name}; livery '{livery['name']}' not applied")
+        livery = None
+
+    svj_nodes = convert_car_to_glb(car_name, str(meb_dir), str(glb_out), tex_dirs, livery)
     if not svj_nodes:
         return False
 
@@ -415,6 +434,7 @@ def process_car(
     # ── 7. Cleanup ───────────────────────────────────────────────────────────
     if cleanup:
         _cleanup_dir(str(car_work))
+        _cleanup_dir(str(Path(work_dir) / f"{car_name}_livery"))
         print(f"    Temp workspace removed")
 
     return True

@@ -358,12 +358,11 @@ class MebFile:
                 out.append((x, y, z))
         return out
 
-    def uvs(self) -> List[Tuple[float, float]]:
-        """Return list of (u, v) UV coords from the primary TEXCOORD[0] stream."""
-        # Find first TEXCOORD stream (semantic_idx 0)
+    def uvs(self, sem_idx: int = 0) -> List[Tuple[float, float]]:
+        """Return list of (u, v) UV coords from the TEXCOORD[sem_idx] stream."""
         s = None
         for st in self.streams:
-            if st.semantic == 3 and st.semantic_idx == 0:
+            if st.semantic == 3 and st.semantic_idx == sem_idx:
                 s = st
                 break
         if s is None:

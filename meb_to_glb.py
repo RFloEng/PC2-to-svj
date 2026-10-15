@@ -60,7 +60,7 @@ MebFile = _meb_mod.MebFile
 # LOD-A part selection
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SKIP_PATTERNS = ["_shadow", "_blur", "_dmg", "_glow", "_lodc", "_lodb", "_lodd"]
+_SKIP_PATTERNS = ["_shadow", "_blur", "_dmg", "glow", "flare", "_lodc", "_lodb", "_lodd"]
 
 def _should_include(fname: str) -> bool:
     fn = fname.lower()
@@ -205,6 +205,7 @@ _DEFAULT_COLOR_FALLBACK = (0.50, 0.50, 0.50, 1.0)
 
 _MAX_TEXTURE_SIZE  = 512   # max pixel dimension for embedded textures
 _MIN_TEXTURE_SIZE  = 32    # textures smaller than this are replaced with PBR baseColorFactor
+_NEUTRAL_PAINT    = (0.80, 0.80, 0.82, 1.0)   # un-liveried body colour
 _PAINT_METALLIC    = 0.7   # car paint metallic factor for solid-color materials
 _PAINT_ROUGHNESS   = 0.2   # car paint roughness for solid-color materials
 
@@ -240,6 +241,41 @@ def _parse_bmt_textures(bmt_path: Path) -> Dict[str, str]:
         if first:
             slots["diffuseTexture"] = first
     return slots
+
+
+def _dds_index(search_dirs: List[Path]) -> Dict[str, str]:
+    """{filename_lower: absolute_path} for every DDS under search_dirs."""
+    idx: Dict[str, str] = {}
+    for d in search_dirs:
+        for p in d.rglob("*.dds"):
+            idx[p.name.lower()] = str(p)
+    return idx
+
+
+def parse_default_livery(rcf_path) -> Optional[dict]:
+    """
+    Read a car's .rcf replacement file and return its default livery (the
+    lowest LIVERY number, the first one the game offers):
+      {"id": n, "name": str,
+       "materials": {material_stem: replacement_material_stem},
+       "textures":  {texture_filename: replacement_texture_filename}}
+    All keys are lower-case. Returns None if the file has no livery conditions.
+    """
+    text = Path(rcf_path).read_text(encoding="latin-1", errors="replace")
+    conds = {int(m.group(1)): m.group(2) for m in
+             re.finditer(r'<CONDITION\s+LIVERY="(\d+)"\s*>(.*?)</CONDITION>', text, re.S)}
+    if not conds:
+        return None
+    lid = min(conds)
+    nm = re.search(r'<NAME\s+LIVERY="%d"\s+NAME="([^"]*)"' % lid, text)
+    stem = lambda v: re.split(r"[\\/]", v)[-1].rsplit(".", 1)[0].lower()
+    fname = lambda v: re.split(r"[\\/]", v)[-1].lower()
+    mats = {stem(a): stem(b) for a, b in re.findall(
+        r'<REPLACE\s+MATERIAL="([^"]*)"\s+NEWMATERIAL="([^"]*)"', conds[lid])}
+    texs = {fname(a): fname(b) for a, b in re.findall(
+        r'<REPLACE\s+TEXTURE="([^"]*)"\s+NEWTEXTURE="([^"]*)"', conds[lid])}
+    return {"id": lid, "name": nm.group(1) if nm else f"livery {lid}",
+            "materials": mats, "textures": texs}
 
 
 def _build_texture_map(search_dirs: List[Path]) -> Dict[str, Dict[str, str]]:
@@ -346,6 +382,7 @@ def _make_glb_from_mebs(
     car_name: str,
     texture_search_dirs: Optional[List[str]] = None,
     node_transforms: Optional[Dict[str, Transform]] = None,
+    livery: Optional[dict] = None,
 ) -> Optional[gltf.GLTF2]:
     """
     Parse a list of .meb files and return a pygltflib GLTF2 object.
@@ -372,10 +409,12 @@ def _make_glb_from_mebs(
 
     # ── Texture map ───────────────────────────────────────────────────────────
     tex_map: Dict[str, Dict[str, str]] = {}   # bmt_stem → {slot: dds_path}
+    dds_idx: Dict[str, str] = {}
     if texture_search_dirs and HAS_PIL:
         dirs = [Path(d) for d in texture_search_dirs if os.path.isdir(d)]
         if dirs:
             tex_map = _build_texture_map(dirs)
+            dds_idx = _dds_index(dirs)
 
     # ── Image embedding (each source image embedded once per GLB) ────────────
     tex_cache: Dict[Tuple[str, str], Optional[int]] = {}
@@ -411,6 +450,9 @@ def _make_glb_from_mebs(
 
     # ── Cache: material name → glTF material index ───────────────────────────
     mat_cache: Dict[str, int] = {}
+    livery_mats = (livery or {}).get("materials", {})
+    livery_texs = (livery or {}).get("textures", {})
+    livery_mat_idx: set = set()   # materials whose diffuse is a livery atlas
 
     def _get_or_create_material(mat_name: str) -> int:
         """Return (or create) a glTF material index for a .mtx material name."""
@@ -420,17 +462,28 @@ def _make_glb_from_mebs(
 
         # Derive BMT stem from .mtx path: "vehicles\GT86\Toy_GT86_PAINT.mtx" → "toy_gt86_paint"
         mtx_stem = Path(mat_name).stem.lower()
-        slots = tex_map.get(mtx_stem, {})
+        # Default livery: swap the material and/or textures the .rcf replaces.
+        slots = dict(tex_map.get(livery_mats.get(mtx_stem, mtx_stem), {}))
+        for slot, path in list(slots.items()):
+            new_name = livery_texs.get(Path(path).name.lower())
+            if new_name and new_name in dds_idx:
+                slots[slot] = dds_idx[new_name]
 
         # Diffuse → base colour (tiny swatches become a flat colour instead)
         tex_idx: Optional[int] = None
         embedded_color = None   # sampled RGBA if texture is too small to use
         dds_path = slots.get("diffuseTexture")
+        is_livery_tex = bool(dds_path) and "liveries" in dds_path.lower().replace("\\", "/")
         if dds_path:
             png_bytes = _load_dds_png(dds_path)
             if png_bytes:
                 _probe = _PILImage.open(io.BytesIO(png_bytes))
-                if max(_probe.size) < _MIN_TEXTURE_SIZE:
+                if Path(dds_path).stem.lower() == "common_paint":
+                    # Shared placeholder swatch (red): the game tints it with the
+                    # chosen livery colour at runtime, which is not in the car
+                    # data. Use a neutral light grey instead of misleading red.
+                    embedded_color = _NEUTRAL_PAINT
+                elif max(_probe.size) < _MIN_TEXTURE_SIZE:
                     # Too small (pCARS2 solid-color paint swatch etc.) — sample the
                     # dominant colour and use it as a PBR baseColorFactor instead.
                     px = np.asarray(_probe.convert("RGBA"), dtype=np.float32)
@@ -461,16 +514,19 @@ def _make_glb_from_mebs(
                 used_specular_ext[0] = True
 
         # Build the PBR material
+        is_glass = any(k in mtx_stem for k in ("glass", "window", "screen", "visor"))
         if tex_idx is not None:
             pbr = gltf.PbrMetallicRoughness(
                 baseColorTexture=gltf.TextureInfo(index=tex_idx),
+                baseColorFactor=[1.0, 1.0, 1.0, 0.3 if is_glass else 1.0],
                 metallicFactor=0.0,
-                roughnessFactor=0.7,
+                roughnessFactor=0.05 if is_glass else 0.7,
             )
             mat = gltf.Material(
                 name=mtx_stem,
                 pbrMetallicRoughness=pbr,
                 doubleSided=True,
+                alphaMode="BLEND" if is_glass else "OPAQUE",
             )
             _finish(mat)
         else:
@@ -479,7 +535,6 @@ def _make_glb_from_mebs(
                 r, g, b, a = embedded_color
             else:
                 r, g, b, a = _default_color_for(mtx_stem)
-            is_glass = ("glass" in mtx_stem or "window" in mtx_stem)
             is_paint = ("paint" in mtx_stem or "body" in mtx_stem
                         or "livery" in mtx_stem)
             if is_glass:
@@ -504,6 +559,8 @@ def _make_glb_from_mebs(
 
         materials.append(mat)
         idx = len(materials) - 1
+        if is_livery_tex and tex_idx is not None:
+            livery_mat_idx.add(idx)
         mat_cache[key] = idx
         return idx
 
@@ -582,10 +639,20 @@ def _make_glb_from_mebs(
         acc_uv: Optional[int] = None
         if uvs:
             uv_np = np.array(uvs, dtype=np.float32)
-            # Flip V for glTF convention (V=0 at top)
-            uv_np[:, 1] = 1.0 - uv_np[:, 1]
+            # pCARS2 UVs are already top-down (V=0 at the top of the DDS), the
+            # same as glTF, so no V flip (checked by overlaying the interior UVs
+            # on its atlas).
             bv_uv = _add_bv(uv_np.tobytes(), gltf.ARRAY_BUFFER)
             acc_uv = _add_acc(bv_uv, gltf.FLOAT, len(uvs), "VEC2")
+
+        # Livery atlases are laid out on the second UV set (TEXCOORD[2]); the
+        # first set tiles the detail/weave texture and would repeat the livery
+        # in tiny copies. Only meshes that have that set switch over.
+        acc_uv_liv: Optional[int] = None
+        uvs_liv = m.uvs(2) if livery_mat_idx or livery else []
+        if uvs_liv and len(uvs_liv) == len(pos):
+            bv_ul = _add_bv(np.array(uvs_liv, dtype=np.float32).tobytes(), gltf.ARRAY_BUFFER)
+            acc_uv_liv = _add_acc(bv_ul, gltf.FLOAT, len(uvs_liv), "VEC2")
 
         # ── One Primitive per material submesh ────────────────────────────────
         primitives: List[gltf.Primitive] = []
@@ -605,7 +672,9 @@ def _make_glb_from_mebs(
             attrs = gltf.Attributes(POSITION=acc_pos)
             if acc_nrm is not None:
                 attrs.NORMAL = acc_nrm
-            if acc_uv is not None:
+            if acc_uv_liv is not None and mat_idx in livery_mat_idx:
+                attrs.TEXCOORD_0 = acc_uv_liv
+            elif acc_uv is not None:
                 attrs.TEXCOORD_0 = acc_uv
             prim = gltf.Primitive(attributes=attrs, indices=acc_idx,
                                    mode=gltf.TRIANGLES, material=mat_idx)
@@ -690,6 +759,7 @@ def convert_car_to_glb(
     meb_dir: str,
     out_path: str,
     texture_dirs: Optional[List[str]] = None,
+    livery: Optional[dict] = None,
 ) -> List[str]:
     """
     Find all suitable .meb files under meb_dir for car_name and convert to GLB.
@@ -729,7 +799,7 @@ def convert_car_to_glb(
     if not transforms:
         print(f"  [WARN] {car_name}: no .vhf hierarchy found - parts not positioned")
 
-    g = _make_glb_from_mebs(meb_files, car_name, texture_dirs, transforms)
+    g = _make_glb_from_mebs(meb_files, car_name, texture_dirs, transforms, livery)
     if g is None:
         print(f"  [FAIL] {car_name}: no valid geometry")
         return []
