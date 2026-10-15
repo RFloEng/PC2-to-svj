@@ -1533,7 +1533,6 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                     "id":       node,
                     "mass":     12.0,
                     "hardpoints": hardpoints,
-                    "body_ref": node,
                 },
                 "links": links,
                 **topo_extra,
@@ -1586,7 +1585,7 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
     src = {k: (Path(v).name if v else None) for k, v in files.items()}
     return {
         "specification":         "SVJ",
-        "version":               "0.99.3",
+        "version":               "0.99.4",
         "description":           f"Project CARS 2 — {car} (pCARS2→SVJ auto-converted)",
         "coordinate_system":     "SAE_J670",
         "units":                 "SI",

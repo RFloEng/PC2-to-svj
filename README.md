@@ -1,6 +1,6 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.99.3 files, with matching **GLB** 3D models.
+Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.99.4 files, with matching **GLB** 3D models.
 
 You point it at your own Project CARS 2 installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
