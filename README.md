@@ -83,7 +83,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |
 | Drag coefficient | chassis file (`.cdfbin`); tentative |
-| **Estimated:** suspension geometry where it couldn't be decoded, damper curves for road cars, Pacejka B, brakes, steering, CG height, engine position of RWD cars, differential type | — |
+| **Estimated:** suspension geometry where it couldn't be decoded, damper curves for every car (the game's damper data is not decoded), Pacejka B, brakes, steering, CG height, engine position of RWD cars, differential type | — |
 
 Cars that don't ship their own physics file (for example, many have no tyre file of their own) fall back to the file of a true base variant of the same car when one exists, such as `toyota_gt86_rb` using `toyota_gt86`. Otherwise they use defaults. A different model's data is never borrowed.
 

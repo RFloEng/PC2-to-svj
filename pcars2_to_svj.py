@@ -31,7 +31,7 @@ Data coverage
   powertrain.clutch          driveline.rg     ✅ type + max torque
   powertrain.engine.inertia  driveline.rg     ⚠ crankshaft 1-D mass, unit assumed kg*m^2
   suspension.*.spring.rate   sdfbin           ✅ block structure (N/mm→N/m); front/rear by KC0
-  suspension.*.damper        sdfbin           ✅ 777 Ns/m road reference; race=hash=063ea245
+  suspension.*.damper        estimated        ⚠ damping-ratio curves at the wheel (sdfbin damper data not decoded)
   suspension.*.wheel_center  vdfm             ✅ exact wheel-centre XYZ from physics
   suspension.*.topology      sdfbin+vdfm      ✅ link records, placed on the vdfm wheel centres (estimate when undecodable)
   suspension.*.wheel         hdtbin+vdfm      ✅ D from b31155cd; C from b1033b86; E from c0eaf58d
@@ -521,7 +521,7 @@ def _parse_sdf_physics(sf_sdf: Optional[ShCBFile]) -> Dict[str, float]:
 
     The record body is a stream of 66-byte (road) or 69-byte (some race) repeating
     blocks.  Each block starts with a spring-rate f32 (N/mm); a damper-reference
-    constant (~777 Ns/m) appears 20 bytes later and is used to locate the blocks.
+    tag bytes (read as a ~777 float) appear 20 bytes later and locate the blocks.
     Blocks[1] and blocks[3] form the two axle pairs; the axle with smaller KC0
     (camber-gain ratio at base+76) is assigned as front.
 
@@ -1119,6 +1119,8 @@ def _estimated_double_wishbone(wc: List[float], axle: str
     return hardpoints, links
 
 
+_ZETA_BUMP    = 0.30   # damping ratios for the estimated dampers
+_ZETA_REBOUND = 0.55
 _MAX_JOINT_REACH = 0.45   # m: an upright joint farther than this from its wheel centre is rejected
 
 
@@ -1364,12 +1366,12 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
     Build SVJ suspension as FL/FR/RL/RR per-corner dicts.
 
     Spring rates: extracted from sdfbin hash=670b57ab block structure.
-      Each block starts with spring rate (N/mm); blocks are found via the
-      damper-reference constant (~777 Ns/m at block+20).  Front/rear assignment
+      Each block starts with spring rate (N/mm); blocks are located by the
+      repeating axle-reference tag whose last bytes read as a ~777 float at
+      block+20 (a layout marker, not a damper value).  Front/rear assignment
       uses KC0 (camber-gain ratio): lower KC = front axle.
-    Damper: pCARS2 uses a reference constant 777 Ns/m in the sdfbin for road
-      cars (all values ~776.99, car-independent).  Race cars with explicit
-      damper records (hash=063ea245) use those values instead.
+    Damper: the sdfbin damper data is not decoded; curves are estimates from a
+      damping ratio, the spring rate and the corner mass (flagged _est).
     Topology: decoded from the sdfbin link records where the layout is
       recognised (_real_topologies); otherwise a flagged double-wishbone estimate.
 
@@ -1394,34 +1396,19 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
     else:
         rear_spring, spring_src["rear"] = _ride_rate(rf, 1.7), "estimated_ride_frequency"
 
-    # Damper: pCARS2 stores ~777 Ns/m reference in sdfbin for road cars.
-    # Race cars with hash=063ea245 have explicit per-car values.
-    front_damper = rear_damper = 777.0
-    damper_real = False
-    if sf_sdf is not None:
-        for h in ("063ea245", "06bea245"):
-            r_damp = sf_sdf.get_one(h)
-            if r_damp:
-                # Scan body for values in realistic race damper range (500-8000 Ns/m)
-                damp_candidates = []
-                for k in range(0, len(r_damp.body) - 3, 4):
-                    v = struct.unpack_from("<f", r_damp.body, k)[0]
-                    if not (math.isnan(v) or math.isinf(v)) and 400.0 <= v <= 8000.0:
-                        damp_candidates.append(v)
-                if damp_candidates:
-                    # Use median of candidates to avoid outliers
-                    damp_candidates.sort()
-                    mid = damp_candidates[len(damp_candidates) // 2]
-                    front_damper = rear_damper = round(mid, 1)
-                    damper_real = True
-                break
+    # Dampers: the sdfbin damper values are not decoded (the "777 N·s/m
+    # constant" an earlier version used was a misread of the repeating
+    # axle-reference tag bytes, not damper data). Curves are estimated from a
+    # damping ratio and the corner's spring rate and sprung mass, at the wheel.
+    front_mc = mass * (1 - rf) / 2 * 0.88
+    rear_mc  = mass * rf / 2 * 0.88
 
     real_topo = _real_topologies(parse_sdf_links(sf_sdf), vdfm)
 
     tire_f = _tire_data(sf_hdt, car, "front")
     tire_r = _tire_data(sf_hdt, car, "rear")
 
-    def _corner(axle: str, side: str, spring: float, damper: float,
+    def _corner(axle: str, side: str, spring: float, m_corner: float,
                 tire: Dict) -> Dict:
         tag  = axle[0].upper() + side[0].upper()   # FL, FR, RL, RR
         node = f"upright_{tag.lower()}"
@@ -1499,32 +1486,36 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             "rate":    spring,
             "_source": spring_src[axle],
         }
+        c_crit = 2.0 * math.sqrt(spring * m_corner)            # N·s/m at the wheel
+        c_bump, c_reb = round(_ZETA_BUMP * c_crit, 1), round(_ZETA_REBOUND * c_crit, 1)
         damper_d = {
             "type": "twin_tube",
+            # Force at the wheel against wheel speed; no motion_ratio needed.
+            "reference": "wheel",
             # [velocity_m_s, force_N] pairs; force = coefficient × velocity
-            "bump_curve":    [[0.0, 0.0],
-                              [0.5, round(damper * 0.5, 1)],
-                              [1.0, round(damper, 1)]],
-            "rebound_curve": [[0.0, 0.0],
-                              [0.5, round(damper * 0.75, 1)],
-                              [1.0, round(damper * 1.5, 1)]],
-            "_source": "pcars2_sdfbin",
-            "_note":   "pCARS2 stores ~777 Ns/m reference constant in sdfbin (road cars). "
-                       "Race cars with hash=063ea245 use explicit per-car values.",
+            "bump_curve":    [[0.0, 0.0], [0.5, round(c_bump * 0.5, 1)], [1.0, c_bump]],
+            "rebound_curve": [[0.0, 0.0], [0.5, round(c_reb * 0.5, 1)], [1.0, c_reb]],
+            "_est": True,
+            "_source": "estimated_damping_ratio",
+            "_note": ("Not from the game: the damper values in the sdfbin are not decoded. "
+                      f"Curves are linear, at the wheel (reference 'wheel'): c = zeta x 2 x "
+                      f"sqrt(spring.rate x corner sprung mass), zeta {_ZETA_BUMP} bump / "
+                      f"{_ZETA_REBOUND} rebound (typical road/race values)."),
+            "x_pcars2": {"damping_source": "estimated_damping_ratio",
+                         "damping_ratio_bump": _ZETA_BUMP,
+                         "damping_ratio_rebound": _ZETA_REBOUND},
         }
         if spring_src[axle] != "pcars2_sdfbin":
             spring_d["_est"] = True
             spring_d["_note"] = ("No spring rate in the sdfbin: derived from the car mass, "
                                  "weight split and a typical ride frequency "
                                  "(1.5 Hz front, 1.7 Hz rear).")
-        if not damper_real:
-            damper_d["_est"] = True
         if strut is not None:
             # On a strut the spring and damper sit on the strut axis.
             mounts = {"inboard_mount": strut["inboard_points"][0],
                       "outboard_mount": hardpoints["strut_lower"]}
             spring_d.update(mounts)
-            damper_d.update(mounts)
+            damper_d.update(mounts)   # geometry only: the curves stay wheel-referenced
 
         return {
             "topology": {
@@ -1553,10 +1544,10 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
         }
 
     return {
-        "FL": _corner("front", "left",  front_spring, front_damper, tire_f),
-        "FR": _corner("front", "right", front_spring, front_damper, tire_f),
-        "RL": _corner("rear",  "left",  rear_spring,  rear_damper,  tire_r),
-        "RR": _corner("rear",  "right", rear_spring,  rear_damper,  tire_r),
+        "FL": _corner("front", "left",  front_spring, front_mc, tire_f),
+        "FR": _corner("front", "right", front_spring, front_mc, tire_f),
+        "RL": _corner("rear",  "left",  rear_spring,  rear_mc,  tire_r),
+        "RR": _corner("rear",  "right", rear_spring,  rear_mc,  tire_r),
         # No top-level _note: the schema forbids extra keys here (FL/FR/RL/RR
         # only). Provenance lives in _metadata._section_notes.suspension.
     }
@@ -1625,8 +1616,9 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
                              "drive_type defaults to RWD; year omitted when not in the name."),
             "suspension": (
                 "spring.rate from sdfbin hash 670b57ab block structure (N/mm→N/m), front/rear "
-                "assigned by KC0 camber-gain ratio. damper: ~777 Ns/m pCARS2 reference "
-                "constant (road cars); race cars with hash 063ea245 use a per-car value."
+                "assigned by KC0 camber-gain ratio. damper: not decoded from the game; "
+                "estimated wheel-level curves from a damping ratio (0.30 bump / 0.55 rebound), "
+                "the spring rate and the corner mass (flagged _est)."
             ),
             "powertrain.engine": "displacement/configuration are not encoded in pCARS2 physics files.",
         },
