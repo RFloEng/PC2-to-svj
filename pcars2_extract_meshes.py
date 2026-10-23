@@ -66,6 +66,11 @@ _names_mod = importlib.util.module_from_spec(_spec_n)
 _spec_n.loader.exec_module(_names_mod)
 rank_candidates = _names_mod.rank_candidates
 
+_spec_c = importlib.util.spec_from_file_location("pcars2_to_svj", str(_HERE / "pcars2_to_svj.py"))
+_conv_mod = importlib.util.module_from_spec(_spec_c)
+_spec_c.loader.exec_module(_conv_mod)
+apply_bindings = _conv_mod.apply_bindings
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BFF name mapper
@@ -257,51 +262,6 @@ def _apply_vhf(svj: dict, vhf_data: Optional[dict]) -> None:
             ch[key] = vhf_data[key]
 
 
-_STATION = {"fl": "FL", "fr": "FR", "rl": "RL", "rr": "RR"}
-
-
-def _apply_bindings(svj: dict, mesh_id: str, svj_nodes: List[str]) -> None:
-    """
-    Write SVJ visual bindings (spec §22.3) for the glTF nodes the GLB really
-    contains, at the binding site each node belongs to. Nodes the GLB lacks
-    get no binding: pCARS2 has no separate upright mesh, for instance, so
-    uprights stay unbound rather than pointing at a node that doesn't exist.
-    """
-    def bind(node: str) -> dict:
-        return {"mesh_ref": mesh_id, "node": node}
-
-    # Start clean: earlier versions bound nodes the GLB never had
-    # (e.g. SVJ::body::upright_fl at corner level).
-    def strip(o):
-        if isinstance(o, dict):
-            o.pop("visual", None)
-            for v in o.values():
-                strip(v)
-        elif isinstance(o, list):
-            for v in o:
-                strip(v)
-    strip(svj)
-
-    susp = svj.get("suspension", {})
-    for node in svj_nodes:
-        _, category, ident = node.split("::")
-        if node == "SVJ::body::chassis" and "chassis" in svj:
-            svj["chassis"]["visual"] = bind(node)
-        elif node == "SVJ::steering::wheel" and "steering" in svj:
-            svj["steering"].setdefault("steering_wheel", {})["visual"] = bind(node)
-        elif category in ("wheel", "brake"):
-            part, corner = ident.rsplit("_", 1)
-            station = susp.get(_STATION.get(corner, ""))
-            if station is None:
-                continue
-            if part == "wheel" and "wheel" in station:
-                station["wheel"]["visual"] = bind(node)
-            elif part == "disc" and "disc" in station.get("brake", {}):
-                station["brake"]["disc"]["visual"] = bind(node)
-            elif part == "caliper" and "brake" in station:
-                station["brake"].setdefault("caliper", {})["visual"] = bind(node)
-
-
 def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
                         vhf_data: Optional[dict] = None,
                         svj_nodes: Optional[List[str]] = None):
@@ -324,7 +284,7 @@ def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
             }
         ]
     }
-    _apply_bindings(svj, mesh_id, svj_nodes or [])
+    apply_bindings(svj, mesh_id, svj_nodes or [])
     _apply_vhf(svj, vhf_data)
 
     with open(svj_path, "w", encoding="utf-8") as f:

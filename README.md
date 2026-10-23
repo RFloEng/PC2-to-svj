@@ -1,10 +1,10 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.99.4 files, with matching **GLB** 3D models.
+Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.102 files, with matching **GLB** 3D models.
 
 You point it at your own Project CARS 2 installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
-- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ schema
+- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.102 schema
 - one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse, normal and specular textures), linked from the SVJ file through SVJ visual bindings
 
 All 212 drivable cars convert.
@@ -26,7 +26,7 @@ All 212 drivable cars convert.
   _pcars2/tools/win-x64/PCarsTools.exe
   ```
 - A .NET runtime, version 7 or newer. PCarsTools targets .NET 6; the converter lets it run on a newer runtime automatically.
-- *Optional:* the [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`, for schema validation. Without it, validation is skipped and reported as such.
+- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.102), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter uses its `tools/migrate_suspension.py` to write the unified suspension model, and its schema for validation.
 
 You don't need to download anything else. PCarsTools expects an Oodle DLL named `oo2core_7_win64.dll`, and the converter copies the game's own `oo2core_4_win64.dll` under that name.
 
@@ -86,6 +86,8 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | **Estimated:** suspension geometry where it couldn't be decoded, damper curves for every car (the game's damper data is not decoded), Pacejka B, brakes, steering, CG height, engine position of RWD cars, differential type | — |
 
 Cars that don't ship their own physics file (for example, many have no tyre file of their own) fall back to the file of a true base variant of the same car when one exists, such as `toyota_gt86_rb` using `toyota_gt86`. Otherwise they use defaults. A different model's data is never borrowed.
+
+**Suspension** is written in the unified model of SVJ spec §25 (v0.100+): bodies, joints and spring/damper elements in `chassis.mass_bodies` and `constraints`, plus `wheel_stations[]`. The converter builds the per-corner geometry first, then runs the spec's own migration tool; everything it generates is marked `x_derived`.
 
 **Coordinates** follow SVJ's SAE J670 convention: X forward, Y right, Z down, origin at the front-axle midpoint on the ground. Units are SI, except engine displacement, which the SVJ spec gives in litres.
 

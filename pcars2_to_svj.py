@@ -50,7 +50,7 @@ Requirements
   shcb_reader.py must be in the same directory as this script.
   scipy / numpy optional: enables Pacejka fitting (falls back to estimation).
 
-SVJ schema version targeted: 0.97
+SVJ schema version targeted: 0.102 (unified suspension, spec section 25)
 Coordinate convention: SAE J670 (Z-down).  CG Z is set to zero pending extraction.
 Units: SI — kg, m, N, Pa, N·m, rad.
 """
@@ -121,6 +121,40 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # Directory / file helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+SVJ_VERSION = "0.102"
+_SPEC_TOOLS = _HERE / "svj_spec" / "SVJ-standard-vehicle-json-main" / "tools"
+_migrator = None
+
+
+def _load_migrator():
+    """Import the SVJ reference migration tool (legacy corner suspension -> spec section 25)."""
+    global _migrator
+    if _migrator is None:
+        if not (_SPEC_TOOLS / "migrate_suspension.py").is_file():
+            raise RuntimeError(
+                f"SVJ spec not found at {_SPEC_TOOLS.parent}. Unpack the SVJ "
+                "specification (v0.100 or newer) into svj_spec/SVJ-standard-vehicle-json-main/ "
+                "(see README).")
+        if str(_SPEC_TOOLS) not in sys.path:
+            sys.path.insert(0, str(_SPEC_TOOLS))
+        import migrate_suspension
+        _migrator = migrate_suspension
+    return _migrator
+
+
+def _unify_suspension(svj: Dict) -> Dict:
+    """
+    Convert the corner-based suspension this module builds into the unified model
+    (bodies, joints, elements and wheel_stations[], spec section 25) with the
+    spec's own migration tool, and declare the current spec version.
+    """
+    unified, notes = _load_migrator().migrate(svj)
+    unified["_metadata"]["version"] = SVJ_VERSION
+    for n in notes:
+        print(f"  [migrate] {n}")
+    return unified
+
 
 def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
     """
@@ -1576,7 +1610,7 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
     src = {k: (Path(v).name if v else None) for k, v in files.items()}
     return {
         "specification":         "SVJ",
-        "version":               "0.99.4",
+        "version":               SVJ_VERSION,
         "description":           f"Project CARS 2 — {car} (pCARS2→SVJ auto-converted)",
         "coordinate_system":     "SAE_J670",
         "units":                 "SI",
@@ -1605,16 +1639,16 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
             "vehicle_info.drive_type (defaults to RWD)",
             "chassis.center_of_gravity (height Z not stored; X from weight split when available)",
             "chassis.mass_total (default 1200 kg; no mrdf found)",
-            "suspension.*.topology (estimated on corners whose topology has _est: "
-            "system_type, links and all hardpoints except wheel_center)",
-            "suspension.*.brake (disc type/size estimated)",
+            "constraints / chassis.mass_bodies suspension links (estimated on corners "
+            "whose topology has _est: link layout and all hardpoints except wheel_center)",
+            "wheel_stations.*.brake (disc type/size estimated)",
             "steering.* (all placeholders)",
         ],
         # Notes for sections whose schema forbids extra keys
         "_section_notes": {
             "vehicle_info": ("make/model parsed from the physics file name; "
                              "drive_type defaults to RWD; year omitted when not in the name."),
-            "suspension": (
+            "wheel_stations": (
                 "spring.rate from sdfbin hash 670b57ab block structure (N/mm→N/m), front/rear "
                 "assigned by KC0 camber-gain ratio. damper: not decoded from the game; "
                 "estimated wheel-level curves from a damping ratio (0.30 bump / 0.55 rebound), "
@@ -1796,7 +1830,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         resolved.add("powertrain.layout")
     if all(not suspension.get(c, {}).get("topology", {}).get("_est")
            for c in ("FL", "FR", "RL", "RR")):
-        resolved.add("suspension.*.topology")
+        resolved.add("constraints")
     metadata["_known_placeholders"] = [
         p for p in metadata["_known_placeholders"]
         if p.split(" ")[0] not in resolved
@@ -1841,7 +1875,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
             "meshes": [],   # no mesh data available from pCARS2 physics-only extraction
         },
     }
-    return svj
+    return _unify_suspension(svj)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1892,20 +1926,68 @@ def _prune_bindings(svj: Dict, svj_dir: Path) -> None:
     walk(svj)
 
 
-def _copy_visual_bindings(old: Any, new: Any) -> None:
-    """Copy every 'visual' block from old into new where the parent exists in both."""
-    if isinstance(old, dict) and isinstance(new, dict):
-        for k, v in old.items():
-            if k == "visual":
-                if isinstance(v, dict) and str(v.get("node", "")).startswith("SVJ::"):
-                    new[k] = v
-            elif k in new:
-                _copy_visual_bindings(v, new[k])
-        # Parts the mesh step created only to hold a binding (caliper,
-        # steering_wheel) don't exist in a fresh conversion: recreate them.
-        for k in ("caliper", "steering_wheel"):
-            if k in old and k not in new and isinstance(old[k], dict) and "visual" in old[k]:
-                new[k] = {"visual": old[k]["visual"]}
+_STATION = {"fl": "FL", "fr": "FR", "rl": "RL", "rr": "RR"}
+
+
+def apply_bindings(svj: Dict, mesh_id: str, nodes: Any) -> None:
+    """
+    Write SVJ visual bindings (spec section 22.3) for the glTF nodes a GLB really
+    contains, at the binding site each node belongs to in the unified layout:
+    chassis, steering wheel, wheel bodies (mass_bodies) and wheel_stations brakes.
+    Nodes with no site get no binding; pCARS2 has no separate upright mesh, so
+    uprights stay unbound.
+    """
+    def bind(node: str) -> Dict:
+        return {"mesh_ref": mesh_id, "node": node}
+
+    def strip(o: Any) -> None:
+        if isinstance(o, dict):
+            o.pop("visual", None)
+            for v in o.values():
+                strip(v)
+        elif isinstance(o, list):
+            for v in o:
+                strip(v)
+    strip(svj)
+
+    bodies = {b.get("id"): b for b in svj.get("chassis", {}).get("mass_bodies", [])
+              if isinstance(b, dict)}
+    stations = {s.get("id"): s for s in svj.get("wheel_stations", []) if isinstance(s, dict)}
+    for node in sorted(nodes):
+        parts = node.split("::")
+        if len(parts) != 3:
+            continue
+        _, category, ident = parts
+        if node == "SVJ::body::chassis" and "chassis" in svj:
+            svj["chassis"]["visual"] = bind(node)
+        elif node == "SVJ::steering::wheel" and "steering" in svj:
+            svj["steering"].setdefault("steering_wheel", {})["visual"] = bind(node)
+        elif category in ("wheel", "brake"):
+            part, _, corner = ident.rpartition("_")
+            station = stations.get(_STATION.get(corner, ""))
+            if station is None:
+                continue
+            if part == "wheel" and f"wheel_{corner}" in bodies:
+                bodies[f"wheel_{corner}"]["visual"] = bind(node)
+            elif part == "disc" and "disc" in station.get("brake", {}):
+                station["brake"]["disc"]["visual"] = bind(node)
+            elif part == "caliper" and "brake" in station:
+                station["brake"].setdefault("caliper", {})["visual"] = bind(node)
+
+
+def _bound_nodes(o: Any, out: Optional[set] = None) -> set:
+    """Every SVJ:: node name bound by a 'visual' block anywhere in o."""
+    out = set() if out is None else out
+    if isinstance(o, dict):
+        v = o.get("visual")
+        if isinstance(v, dict) and str(v.get("node", "")).startswith("SVJ::"):
+            out.add(v["node"])
+        for x in o.values():
+            _bound_nodes(x, out)
+    elif isinstance(o, list):
+        for x in o:
+            _bound_nodes(x, out)
+    return out
 
 
 def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
@@ -1931,7 +2013,7 @@ def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
                         mesh["id"] = mesh_id(mesh["id"])
                 svj.setdefault("assets", {})["meshes"] = old_meshes
                 fresh = json.loads(json.dumps(svj))
-                _copy_visual_bindings(old, fresh)
+                apply_bindings(fresh, old_meshes[0]["id"], _bound_nodes(old))
                 # Keep only bindings that resolve to a node in the GLB; this
                 # also drops pre-0.99.2 bindings to nodes the GLB never had.
                 _prune_bindings(fresh, p.parent)
