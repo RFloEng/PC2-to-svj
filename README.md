@@ -26,11 +26,19 @@ All 212 drivable cars convert.
   _pcars2/tools/win-x64/PCarsTools.exe
   ```
 - A .NET runtime, version 7 or newer. PCarsTools targets .NET 6; the converter lets it run on a newer runtime automatically.
-- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.102), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter uses its `tools/migrate_suspension.py` to write the unified suspension model, and its schema for validation.
+- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.102), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
 
 You don't need to download anything else. PCarsTools expects an Oodle DLL named `oo2core_7_win64.dll`, and the converter copies the game's own `oo2core_4_win64.dll` under that name.
 
 ## Usage
+
+### One command
+
+```bash
+python convert_all.py
+```
+
+Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to `_pcars2/cars/<car>/`. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
 
 ### GUI
 
@@ -105,7 +113,9 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 
 | File | Purpose |
 |---|---|
+| `convert_all.py` | One-command pipeline: unpack, convert, models, validate |
 | `pc2_to_svj_gui.py` | GUI |
+| `svj_migrate/` | The SVJ standard's suspension migration, vendored (refresh with `vendor_svj_migrate.py`) |
 | `pcars2_to_svj.py` | Physics → SVJ converter |
 | `pcars2_extract_meshes.py` | Per-car model extraction pipeline |
 | `pcars2_collision.py` | Collision XML → hinged parts, joints, poses and collision proxies |

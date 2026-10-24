@@ -127,23 +127,18 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 SVJ_VERSION = "0.102"
-_SPEC_TOOLS = _HERE / "svj_spec" / "SVJ-standard-vehicle-json-main" / "tools"
 _migrator = None
 
 
 def _load_migrator():
-    """Import the SVJ reference migration tool (legacy corner suspension -> spec section 25)."""
+    """The SVJ standard's suspension migration (legacy corner suspension -> spec section 25),
+    vendored in svj_migrate/ (refresh it with vendor_svj_migrate.py)."""
     global _migrator
     if _migrator is None:
-        if not (_SPEC_TOOLS / "migrate_suspension.py").is_file():
-            raise RuntimeError(
-                f"SVJ spec not found at {_SPEC_TOOLS.parent}. Unpack the SVJ "
-                "specification (v0.100 or newer) into svj_spec/SVJ-standard-vehicle-json-main/ "
-                "(see README).")
-        if str(_SPEC_TOOLS) not in sys.path:
-            sys.path.insert(0, str(_SPEC_TOOLS))
-        import migrate_suspension
-        _migrator = migrate_suspension
+        if str(_HERE) not in sys.path:
+            sys.path.insert(0, str(_HERE))
+        import svj_migrate
+        _migrator = svj_migrate
     return _migrator
 
 
