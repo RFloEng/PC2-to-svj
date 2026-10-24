@@ -1569,6 +1569,20 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             if alignment:
                 alignment["_note"] = ("Default setup values from the chassis file (range start + "
                                       "setting x step), degrees converted to radians.")
+        arb = {}
+        arb_rate = (chassis or {}).get("arb_front_Nm" if axle == "front" else "arb_rear_Nm")
+        if arb_rate:
+            track = (vdfm or {}).get("track_front" if axle == "front" else "track_rear") or _DEFAULT_TRACK
+            arb = {"bar_id": f"arb_{axle}",
+                   # roll stiffness a wheel rate k adds across a track t is k t^2 / 2
+                   "bar_rate": round(0.5 * arb_rate * track ** 2, 1),
+                   "wheel_rate_equiv": float(arb_rate),
+                   "motion_ratio": 1.0,
+                   "_est": True,
+                   "_note": ("wheel_rate_equiv is the bar rate of the chassis file (the setup screen "
+                             "shows it in N/mm; confirmed on the GT86: 55 front, 20 rear). bar_rate is "
+                             "the roll stiffness that wheel rate gives across the track, with the arm "
+                             "geometry unknown (motion ratio 1 assumed).")}
         strut = next((l for l in links if l["type"] == "strut"), None)
         spring_d = {
             "type":    "coil",
@@ -1580,15 +1594,24 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             dm = ccx.get("damper_mult") or 1.0
             sb, fb, sr, fr = (ccx["damper"][k] * dm for k in
                               ("SlowBump", "FastBump", "SlowRebound", "FastRebound"))
-            vk = _DAMPER_KNEE                                   # m/s, slow -> fast
+            tr = ccx.get("transition") or {}
+            mr = math.sqrt(dm)               # DamperMult taken as the motion ratio squared
 
-            def _curve(slow: float, fast: float) -> List[List[float]]:
-                return [[0.0, 0.0], [vk, round(slow * vk, 1)],
-                        [1.0, round(slow * vk + fast * (1.0 - vk), 1)]]
-            note = ("Slow and fast bump and rebound coefficients (N.s/m) from the chassis file, "
-                    "times DamperMult, as force against wheel speed (reference 'wheel'). The file "
-                    f"gives the two slopes; the speed where they meet is assumed {vk} m/s. "
-                    "The raw bump/rebound transition values are kept in x_pcars2.")
+            def _curve(slow: float, fast: float, transition: Optional[float]) -> List[List[float]]:
+                """Force against wheel speed: the slow slope up to the transition force, then the fast one."""
+                if not transition or slow <= 0:
+                    vk, fk = _DAMPER_KNEE, slow * dm * _DAMPER_KNEE
+                else:
+                    # damper level: knee at force F, speed F / slow; wheel level: speed / MR, force x MR
+                    vk, fk = (abs(transition) / slow) / mr, abs(transition) * mr
+                vk = min(vk, 0.9)
+                return [[0.0, 0.0], [round(vk, 4), round(fk, 1)],
+                        [1.0, round(fk + fast * dm * (1.0 - vk), 1)]]
+            note = ("Slow and fast bump and rebound coefficients (N.s/m) times DamperMult, as force "
+                    "against wheel speed (reference 'wheel'). The slope changes from slow to fast at "
+                    "the bump/rebound transition force (N) of the chassis file, confirmed against the "
+                    "game's setup screen for the GT86. DamperMult is taken as the motion ratio squared.")
+            slow_bump, slow_reb = sb / dm, sr / dm
             src = "pcars2_cdfbin"
             x_p = {"damping_source": src,
                    "slow_bump": round(sb, 1), "fast_bump": round(fb, 1),
@@ -1596,7 +1619,8 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                    "damper_mult": dm, "transition_raw": ccx.get("transition"),
                    "damping_ratio_bump": round(sb / c_crit, 3),
                    "damping_ratio_rebound": round(sr / c_crit, 3)}
-            bump_curve, reb_curve = _curve(sb, fb), _curve(sr, fr)
+            bump_curve = _curve(slow_bump, fb / dm, tr.get("BumpTransition"))
+            reb_curve = _curve(slow_reb, fr / dm, tr.get("ReboundTransition"))
         else:
             c_bump, c_reb = round(_ZETA_BUMP * c_crit, 1), round(_ZETA_REBOUND * c_crit, 1)
             note = ("Not from the game: no damper data in the chassis file. Curves are linear, at "
@@ -1648,6 +1672,7 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             },
             "wheel": wheel_dict,
             **({"alignment": alignment} if alignment else {}),
+            **({"arb": arb} if arb else {}),
             "spring": spring_d,
             "damper": damper_d,
             "brake": {

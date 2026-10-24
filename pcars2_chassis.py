@@ -14,7 +14,7 @@ below follows that document.
 Field encoding (the "ending" of a hash token):
   <hash:4> <type> <body...>
     type high nibble  A=float,float  5=int,int  1=int,byte  2=float,byte
-                      8=byte,float   0=byte,byte
+                      8=byte,float   0=byte,byte   4=byte,int
     type low bits     2 = two values, 3 = three values (the third value's kind
                       is the first body byte: 0 byte, 1 int, 2 float)
   A "Range" is (start, step, count) and its "Setting" an index, so the value in
@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 _HERE = Path(__file__).parent
 NAMES: Dict[str, str] = json.loads((_HERE / "pcars2_hashnames.json").read_text(encoding="utf-8"))
 
-_KIND = {0xA: "ff", 0x5: "ii", 0x1: "ib", 0x2: "fb", 0x8: "bf", 0x0: "bb"}
+_KIND = {0xA: "ff", 0x5: "ii", 0x1: "ib", 0x2: "fb", 0x8: "bf", 0x0: "bb", 0x4: "bi"}
 
 
 def _read(code: str, b: bytes, o: int) -> Tuple[Any, int]:
@@ -125,6 +125,10 @@ def parse_chassis(sf) -> Dict[str, Any]:
             out["steering_ratio"] = _value(vals, st, "SteeringRatioSetting")
         elif name == "SteeringLockRange":
             out["steering_lock_deg"] = vals[0]
+        elif name == "FrontAntiSwayRange":
+            out["arb_front_Nm"] = _value(vals, st, "FrontAntiSwaySetting")
+        elif name == "RearAntiSwayRange":
+            out["arb_rear_Nm"] = _value(vals, st, "RearAntiSwaySetting")
         elif name == "RearBrakeRange":
             out["brake_bias_rear"] = _value(vals, st, "RearBrakeSetting")
         elif name == "BrakePressureRange":
