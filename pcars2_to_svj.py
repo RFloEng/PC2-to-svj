@@ -360,6 +360,8 @@ def _apply_chassis_diffs(diffs: List[Dict], cd: Optional[Dict]) -> None:
             d["lock_power"] = round((bp - 1.0) / (bp + 1.0), 4)
             d["lock_coast"] = round((bc - 1.0) / (bc + 1.0), 4)
             x["bias_ratio_power"], x["bias_ratio_coast"] = round(bp, 3), round(bc, 3)
+        if "ClutchLsd" in act and info.get("clutches"):
+            x["clutch_plates"] = info["clutches"]
         if "ViscousLsd" in act and info.get("viscous_lock") is not None:
             x["viscous_lock_setting"] = info["viscous_lock"]
         d["x_pcars2"] = x

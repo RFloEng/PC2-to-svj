@@ -61,6 +61,8 @@ def decode_values(type_code: int, body: bytes) -> Optional[Tuple[List[Any], byte
         for k in kinds:
             v, o = _read(k, body, o)
             vals.append(v)
+        if kinds[0] == "b" and vals[0] > 127:
+            vals[0] -= 256         # a byte start is signed: the GT86 preload 156 reads -100 (-100 + 14 x 10 = 40 Nm)
         return vals, body[o:]
     except (IndexError, struct.error):
         return None
@@ -190,6 +192,8 @@ def parse_diffs(sf) -> Dict[str, Dict[str, Any]]:
             slot["bias_power"] = vals[0] + (_first_setting(st) or 0) * vals[1]
         elif sub == "BiasRatioCoastRange":
             slot["bias_coast"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+        elif sub == "ClutchLsd":
+            slot["clutches"] = vals[0] + (_first_setting(st) or 0) * vals[1]
         elif sub == "ClutchLsdPreloadRange":
             slot["preload_Nm"] = vals[0] + (_first_setting(st) or 0) * vals[1]
         elif sub == "ClutchLsdPowerRampRange":
