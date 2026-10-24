@@ -89,6 +89,8 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 
 **Suspension** is written in the unified model of SVJ spec §25 (v0.100+): bodies, joints and spring/damper elements in `chassis.mass_bodies` and `constraints`, plus `wheel_stations[]`. The converter builds the per-corner geometry first, then runs the spec's own migration tool; everything it generates is marked `x_derived`.
 
+**Hinged parts and collision proxies** come from the plain-text collision XML in each car's vehicle archive (`pcars2_extract_meshes.py`, with `--vhf-only` for a fast pass without meshes). Each convex hull becomes a box proxy (`collision[]`, spec §28); parts with a hinge descriptor (bonnet, boot, bumpers, …) become bodies with the game's mass, a revolute joint and an `<part>_open` pose (§24). The extraction saves `<car>.collision.json` beside the SVJ file and later physics conversions reapply it. Masses, box inertias and the closed-pose angle are flagged estimates; the hinge axis is oriented so a positive angle lifts the part.
+
 **Coordinates** follow SVJ's SAE J670 convention: X forward, Y right, Z down, origin at the front-axle midpoint on the ground. Units are SI, except engine displacement, which the SVJ spec gives in litres.
 
 **3D models** follow SVJ spec 22.4: glTF Y-up, +X right, -Z forward, with the origin at the front-axle midpoint on the ground, so a GLB lines up with the SVJ's hardpoints without any extra transform. The game's mesh space is left-handed, so the conversion mirrors it (and reverses triangle winding). Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game. Parts are grouped under nodes named by the SVJ naming convention (`SVJ::body::chassis`, `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel`, …), and the SVJ file binds only the nodes its GLB actually contains.
@@ -106,6 +108,7 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 | `pc2_to_svj_gui.py` | GUI |
 | `pcars2_to_svj.py` | Physics → SVJ converter |
 | `pcars2_extract_meshes.py` | Per-car model extraction pipeline |
+| `pcars2_collision.py` | Collision XML → hinged parts, joints, poses and collision proxies |
 | `meb_to_glb.py` | Builds GLB files from `.meb` mesh parts |
 | `meb_reader.py` | `.meb` mesh format reader |
 | `shcb_reader.py` | Reader for the `ShCB` physics container (`.edfbin`, `.gdfbin`, …) |

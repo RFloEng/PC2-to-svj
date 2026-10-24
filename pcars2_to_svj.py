@@ -84,6 +84,10 @@ _names_mod = importlib.util.module_from_spec(_spec_n)
 _spec_n.loader.exec_module(_names_mod)
 rank_candidates = _names_mod.rank_candidates
 
+_spec_c = importlib.util.spec_from_file_location("pcars2_collision", str(_HERE / "pcars2_collision.py"))
+_collision_mod = importlib.util.module_from_spec(_spec_c)
+_spec_c.loader.exec_module(_collision_mod)
+
 # ── vdfm name aliases (SVJ car name → vdfm stem when they differ) ─────────────
 _VDFM_ALIASES: Dict[str, str] = {
     "audi_r8_lms":                              "audi_r8_lms15",
@@ -1820,6 +1824,10 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         vdfm=(vdfm_data or {}).get("_vdfm_file"),
         mrdf=mrdf_data.get("_mrdf_file"),
     )
+    if vdfm_data:
+        # Game-frame Z of the front axle: lets later passes (collision hulls)
+        # place game-frame points in SVJ coordinates without the vdfm.
+        metadata["_vhf_front_axle_z"] = vdfm_data["_front_axle_x"]
     # Drop placeholder entries the spec sheet resolved
     resolved = set()
     if mrdf_data.get("mass_kg"):
@@ -1990,6 +1998,24 @@ def _bound_nodes(o: Any, out: Optional[set] = None) -> set:
     return out
 
 
+def collision_sidecar(svj_path: Any) -> Path:
+    """<car>.collision.json next to <car>.svj.json: the parsed collision XML of the car."""
+    p = Path(svj_path)
+    return p.with_name(p.name.replace(".svj.json", "") + ".collision.json")
+
+
+def apply_collision_sidecar(svj: Dict, svj_path: Any) -> Optional[Dict[str, int]]:
+    """Add collision-derived bodies, hinges and proxies if the car has a sidecar."""
+    side = collision_sidecar(svj_path)
+    if not side.is_file() or "_vhf_front_axle_z" not in svj.get("_metadata", {}):
+        return None
+    try:
+        data = json.loads(side.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return _collision_mod.apply_collision(svj, data)
+
+
 def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
     """
     Write an SVJ dict to disk, preserving mesh links and visual bindings
@@ -2020,6 +2046,7 @@ def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
                 svj.clear(); svj.update(fresh)
         except (OSError, ValueError):
             pass   # unreadable old file: just overwrite it
+    apply_collision_sidecar(svj, p)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(svj, fh, indent=indent, ensure_ascii=False)

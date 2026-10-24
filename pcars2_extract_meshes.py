@@ -383,13 +383,32 @@ def process_car(
     else:
         print(f"    VHF: not found or parse failed")
 
-    # ── 6. Update SVJ ────────────────────────────────────────────────────────
+    # ── 5b. Collision hulls and hinges (plain-text XML in the archive) ──────
+    collision = _conv_mod._collision_mod.parse_collision_dir(str(car_work))
     svj_path = car_out / f"{car_name}.svj.json"
+    if collision:
+        _conv_mod.collision_sidecar(svj_path).write_text(
+            json.dumps(collision), encoding="utf-8")
+        print(f"    Collision: {len(collision['shapes'])} hulls, "
+              f"{len(collision['joints'])} hinges")
+    else:
+        print("    Collision: no XML in the archive")
+
+    # ── 6. Update SVJ ────────────────────────────────────────────────────────
     if svj_path.is_file():
         # The GLB sits next to the SVJ, so the URI is just its file name
         glb_rel = glb_out.name
         _update_svj_assets(str(svj_path), car_name, glb_rel, vhf_data, svj_nodes)
         print(f"    SVJ updated: assets.meshes -> {glb_rel}")
+        if collision:
+            with open(svj_path, encoding="utf-8") as f:
+                svj = json.load(f)
+            counts = _conv_mod.apply_collision_sidecar(svj, svj_path)
+            with open(svj_path, "w", encoding="utf-8") as f:
+                json.dump(svj, f, indent=2, ensure_ascii=False)
+            if counts:
+                print(f"    SVJ updated: {counts['bodies']} hinged parts, "
+                      f"{counts['proxies']} collision proxies")
 
     # ── 7. Cleanup ───────────────────────────────────────────────────────────
     if cleanup:
@@ -514,13 +533,18 @@ Examples
                 if cleanup: _cleanup_dir(str(car_work))
                 continue
             vhf_data = _parse_vhf(str(car_work))
+            svj_path = Path(cars_dir) / car / f"{car}.svj.json"
+            collision = _conv_mod._collision_mod.parse_collision_dir(str(car_work))
+            if collision:
+                _conv_mod.collision_sidecar(svj_path).write_text(
+                    json.dumps(collision), encoding="utf-8")
             if vhf_data:
-                svj_path = Path(cars_dir) / car / f"{car}.svj.json"
                 if svj_path.is_file():
                     # Keep existing assets.meshes; only update chassis geometry
                     with open(svj_path, encoding="utf-8") as f:
                         svj = json.load(f)
                     _apply_vhf(svj, vhf_data)
+                    _conv_mod.apply_collision_sidecar(svj, svj_path)
                     with open(svj_path, "w", encoding="utf-8") as f:
                         json.dump(svj, f, indent=2, ensure_ascii=False)
                     print(f"wb={vhf_data['wheelbase']}m  trk_f={vhf_data['track_front']}m")
