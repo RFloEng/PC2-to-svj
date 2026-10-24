@@ -31,7 +31,7 @@ Data coverage
   powertrain.clutch          driveline.rg     ✅ type + max torque
   powertrain.engine.inertia  driveline.rg     ⚠ crankshaft 1-D mass, unit assumed kg*m^2
   suspension.*.spring.rate   sdfbin           ✅ block structure (N/mm→N/m); front/rear by KC0
-  suspension.*.damper        estimated        ⚠ damping-ratio curves at the wheel (sdfbin damper data not decoded)
+  suspension.*.damper        sdfbin (inferred) ⚠ read from the spring's triple as kN.s/m; estimated where absent
   suspension.*.wheel_center  vdfm             ✅ exact wheel-centre XYZ from physics
   suspension.*.topology      sdfbin+vdfm      ✅ link records, placed on the vdfm wheel centres (estimate when undecodable)
   suspension.*.wheel         hdtbin+vdfm      ✅ D from b31155cd; C from b1033b86; E from c0eaf58d
@@ -150,6 +150,16 @@ def _unify_suspension(svj: Dict) -> Dict:
     """
     unified, notes = _load_migrator().migrate(svj)
     unified["_metadata"]["version"] = SVJ_VERSION
+    # The migration keeps a spring's or damper's numbers but not where they came
+    # from; carry the provenance notes over so estimates stay flagged.
+    by_id = {c.get("id"): c for c in unified.get("constraints", []) if isinstance(c, dict)}
+    for corner, data in svj.get("suspension", {}).items():
+        for kind in ("spring", "damper"):
+            src, dst = data.get(kind), by_id.get(f"{kind}_{corner.lower()}")
+            if isinstance(src, dict) and dst is not None:
+                for key in ("_source", "_note", "_est", "x_pcars2"):
+                    if key in src:
+                        dst[key] = src[key]
     for n in notes:
         print(f"  [migrate] {n}")
     return unified
@@ -548,7 +558,80 @@ def parse_sdf_links(sf_sdf: Optional[ShCBFile]) -> Dict[str, Any]:
     return {"links": links, "tops": tops, "axle_z": axle_z}
 
 
-def _parse_sdf_physics(sf_sdf: Optional[ShCBFile]) -> Dict[str, float]:
+_SPRING_TAG = bytes.fromhex("670b57ab21")      # <rate f32, N/mm> then the damper triple
+_TRIPLE_TAG = bytes.fromhex("bbb39f0ba302")    # three f32 after the rate
+_STATION_TAG = bytes.fromhex("feea2302")       # <x f32> 00 <z f32>: where the element sits
+
+
+def _parse_sdf_elements(sf_sdf: Optional[ShCBFile]) -> Dict[str, Dict[str, Any]]:
+    """
+    Per-axle spring and damper from the sdfbin, located by position.
+
+    The file holds, for each wheel, two elements: one at the wheel's lateral
+    position (the corner spring and damper) and one further inboard (probably the
+    anti-roll bar: a car with no rear bar, such as the Caterham 620R, has no
+    inboard element at the rear). Each is `rate (N/mm)`, a triple of f32, and
+    the station (x, z) that follows it; z < 0 is the front axle. Of the two, the
+    one with the larger first triple value is the corner element.
+
+    Returns {"front"|"rear": {"spring_Nm", "damper": (v1, v2, v3)}}, or {} when
+    the layout is not recognised. The triple is read as damping coefficients in
+    kN.s/m (v1 rebound, v2 bump), an inference that gives damping ratios of 0.23
+    to 0.50 (median 0.37) over 130 cars; it is not confirmed against the game.
+    """
+    if sf_sdf is None:
+        return {}
+    b = sf_sdf._buf[sf_sdf.header.hdr_size: sf_sdf.header.sec_offset]
+    events = []
+    o = b.find(_SPRING_TAG)
+    while o != -1:
+        if o + 9 <= len(b):
+            rate = struct.unpack_from("<f", b, o + 5)[0]
+            t = b.find(_TRIPLE_TAG, o, o + 40)
+            if t >= 0 and t + 18 <= len(b):
+                events.append((o, 0, rate, struct.unpack_from("<3f", b, t + 6)))
+        o = b.find(_SPRING_TAG, o + 1)
+    o = b.find(_STATION_TAG)
+    while o != -1:
+        if o + 13 <= len(b) and b[o + 8] == 0:
+            events.append((o, 1, struct.unpack_from("<f", b, o + 4)[0],
+                           struct.unpack_from("<f", b, o + 9)[0]))
+        o = b.find(_STATION_TAG, o + 1)
+    events.sort(key=lambda e: e[0])
+
+    axles: Dict[str, List[Tuple[float, Tuple[float, ...]]]] = {"front": [], "rear": []}
+    pending = None
+    for _, kind, a, c in events:
+        if kind == 0:
+            pending = (a, c)
+        elif pending is not None:
+            if math.isfinite(c) and abs(c) > 0.2:
+                axles["front" if c < 0 else "rear"].append(pending)
+            pending = None
+    out: Dict[str, Dict[str, Any]] = {}
+    for axle, els in axles.items():
+        els = [e for e in els if all(math.isfinite(v) for v in (e[0], *e[1]))
+               and 1.0 < e[0] < 500.0 and e[1][0] > 0]
+        if not els:
+            return {}
+        rate, trip = max(els, key=lambda e: e[1][0])
+        out[axle] = {"spring_Nm": round(rate * 1000.0), "damper": tuple(round(v, 4) for v in trip)}
+    return out
+
+
+def _parse_sdf_physics(sf_sdf: Optional[ShCBFile]) -> Dict[str, Any]:
+    """
+    Per-axle spring rates (and dampers) from the sdfbin: by axle position when the
+    layout is recognised (_parse_sdf_elements), else the older block scan below.
+    """
+    el = _parse_sdf_elements(sf_sdf)
+    if el:
+        return {"front_spring_Nm": el["front"]["spring_Nm"], "rear_spring_Nm": el["rear"]["spring_Nm"],
+                "front_damper": el["front"]["damper"], "rear_damper": el["rear"]["damper"]}
+    return _parse_sdf_physics_blocks(sf_sdf)
+
+
+def _parse_sdf_physics_blocks(sf_sdf: Optional[ShCBFile]) -> Dict[str, float]:
     """
     Extract per-axle spring rates from sdfbin hash=670b57ab block structure.
 
@@ -1520,7 +1603,27 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             "_source": spring_src[axle],
         }
         c_crit = 2.0 * math.sqrt(spring * m_corner)            # N·s/m at the wheel
-        c_bump, c_reb = round(_ZETA_BUMP * c_crit, 1), round(_ZETA_REBOUND * c_crit, 1)
+        game_c = sdf_physics.get(f"{axle}_damper")
+        if game_c:
+            # Triple stored with the corner spring, read as kN·s/m (inferred, see
+            # _parse_sdf_elements): first value rebound, second bump.
+            c_reb, c_bump = round(game_c[0] * 1000.0, 1), round(game_c[1] * 1000.0, 1)
+            zr, zb = round(c_reb / c_crit, 3), round(c_bump / c_crit, 3)
+            note = ("Read from the sdfbin triple stored with the corner spring, taken as damping "
+                    "coefficients in kN.s/m at the wheel (first value rebound, second bump). "
+                    "This reading is inferred, not confirmed against the game: it gives damping "
+                    "ratios of 0.23-0.50 (median 0.37) over 130 cars. Curves are linear.")
+            src = "pcars2_sdfbin_inferred"
+            x_p = {"damping_source": src, "sdfbin_triple_kNs_per_m": list(game_c),
+                   "damping_ratio_bump": zb, "damping_ratio_rebound": zr}
+        else:
+            c_bump, c_reb = round(_ZETA_BUMP * c_crit, 1), round(_ZETA_REBOUND * c_crit, 1)
+            note = ("Not from the game: no damper triple found in the sdfbin. Curves are linear, at "
+                    "the wheel (reference 'wheel'): c = zeta x 2 x sqrt(spring.rate x corner sprung "
+                    f"mass), zeta {_ZETA_BUMP} bump / {_ZETA_REBOUND} rebound (typical values).")
+            src = "estimated_damping_ratio"
+            x_p = {"damping_source": src, "damping_ratio_bump": _ZETA_BUMP,
+                   "damping_ratio_rebound": _ZETA_REBOUND}
         damper_d = {
             "type": "twin_tube",
             # Force at the wheel against wheel speed; no motion_ratio needed.
@@ -1529,14 +1632,9 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             "bump_curve":    [[0.0, 0.0], [0.5, round(c_bump * 0.5, 1)], [1.0, c_bump]],
             "rebound_curve": [[0.0, 0.0], [0.5, round(c_reb * 0.5, 1)], [1.0, c_reb]],
             "_est": True,
-            "_source": "estimated_damping_ratio",
-            "_note": ("Not from the game: the damper values in the sdfbin are not decoded. "
-                      f"Curves are linear, at the wheel (reference 'wheel'): c = zeta x 2 x "
-                      f"sqrt(spring.rate x corner sprung mass), zeta {_ZETA_BUMP} bump / "
-                      f"{_ZETA_REBOUND} rebound (typical road/race values)."),
-            "x_pcars2": {"damping_source": "estimated_damping_ratio",
-                         "damping_ratio_bump": _ZETA_BUMP,
-                         "damping_ratio_rebound": _ZETA_REBOUND},
+            "_source": src,
+            "_note": note,
+            "x_pcars2": x_p,
         }
         if spring_src[axle] != "pcars2_sdfbin":
             spring_d["_est"] = True
