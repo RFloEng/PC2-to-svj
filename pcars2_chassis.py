@@ -148,3 +148,50 @@ def parse_chassis(sf) -> Dict[str, Any]:
             elif name == "BrakePadRange":
                 corner["brake_disc_inertia"] = st.get("BrakeDiscInertia")
     return out
+
+
+_DIFF_KINDS = ("Spool", "GearedLsd", "ClutchLsd", "ViscousLsd", "Ratcheting")
+
+
+def _first_setting(st: Dict[str, Any]) -> Any:
+    return next((v for k, v in st.items() if "etting" in k), None)
+
+
+def parse_diffs(sf) -> Dict[str, Dict[str, Any]]:
+    """
+    Differentials of the chassis file, by "front" / "center" / "rear".
+
+    A type is on when its Option setting is 1 (a car can have several on; they
+    are listed in `active`). Parameters are start + setting x step of the
+    matching ranges: geared bias ratios (power, coast), clutch preload (Nm),
+    ramp angles (degrees) and clutch count, viscous lock.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in sf.records:
+        name = NAMES.get(r.hash_hex, "")
+        if not name.startswith("Diff") or r.type_code in (0x20, 0x21, 0x22, 0x28):
+            continue
+        axle = next((a for a in ("Front", "Center", "Rear") if name.startswith("Diff" + a)), None)
+        d = decode_values(r.type_code, r.body)
+        if axle is None or d is None:
+            continue
+        vals, rest = d
+        st = settings(rest)
+        sub = name[4 + len(axle):]
+        slot = out.setdefault(axle.lower(), {"active": []})
+        if sub.endswith("Option") and sub[:-6] in _DIFF_KINDS:
+            if _first_setting(st):
+                slot["active"].append(sub[:-6])
+        elif sub == "BiasRatioPowerRange":
+            slot["bias_power"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+        elif sub == "BiasRatioCoastRange":
+            slot["bias_coast"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+        elif sub == "ClutchLsdPreloadRange":
+            slot["preload_Nm"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+        elif sub == "ClutchLsdPowerRampRange":
+            slot["ramp_power_deg"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+        elif sub == "ClutchLsdCoastRampRange":
+            slot["ramp_coast_deg"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+        elif sub == "ViscousLockRange":
+            slot["viscous_lock"] = vals[0] + (_first_setting(st) or 0) * vals[1]
+    return out

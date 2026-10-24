@@ -329,6 +329,50 @@ def _extra_diffs(dl_info: Optional[Dict], drive: Optional[str], driven: str) -> 
     return out
 
 
+def _apply_chassis_diffs(diffs: List[Dict], cd: Optional[Dict]) -> None:
+    """
+    Set each differential's type and lock from the chassis file (pcars2_chassis.parse_diffs).
+
+    A type is on when its Option setting is 1; some cars have several on, and
+    then clutch LSD wins over geared (Torsen-like) over viscous, a priority
+    that is a guess (flagged). A geared bias ratio r is a lock of (r-1)/(r+1).
+    """
+    for d in diffs:
+        info = (cd or {}).get(d.get("location"))
+        act = (info or {}).get("active")
+        if not act:
+            continue
+        x = {"active_options": list(act)}
+        if "ClutchLsd" in act:
+            d["type"] = "lsd_clutch"
+            for key, src in (("preload", "preload_Nm"), ("ramp_angle_power", "ramp_power_deg"),
+                             ("ramp_angle_coast", "ramp_coast_deg")):
+                if info.get(src) is not None:
+                    d[key] = float(info[src])
+        elif "GearedLsd" in act:
+            d["type"] = "lsd_torsen"
+        elif "ViscousLsd" in act:
+            d["type"] = "lsd_viscous"
+        elif "Spool" in act:
+            d["type"] = "spool"
+        if "GearedLsd" in act and info.get("bias_power") and info.get("bias_coast"):
+            bp, bc = info["bias_power"], info["bias_coast"]
+            d["lock_power"] = round((bp - 1.0) / (bp + 1.0), 4)
+            d["lock_coast"] = round((bc - 1.0) / (bc + 1.0), 4)
+            x["bias_ratio_power"], x["bias_ratio_coast"] = round(bp, 3), round(bc, 3)
+        if "ViscousLsd" in act and info.get("viscous_lock") is not None:
+            x["viscous_lock_setting"] = info["viscous_lock"]
+        d["x_pcars2"] = x
+        note = "Type and lock from the chassis file (Diff*Option settings and ranges)."
+        if len(act) > 1 and act != ["Ratcheting"]:
+            d["_est"] = True
+            note += (f" Several types are on ({', '.join(act)}); the type chosen follows an assumed "
+                     "priority of clutch over geared over viscous.")
+        if "Ratcheting" in act and len(act) == 1:
+            note += " Only a ratcheting differential is on; type left unchanged."
+        d["_note"] = note
+
+
 def mesh_id(car: str) -> str:
     """
     The assets.meshes id for a car. The schema requires ^[a-z0-9_]+$, and car
@@ -1948,6 +1992,11 @@ def convert_car(car: str, extracted_root: str) -> Dict:
             "meshes": [],   # no mesh data available from pCARS2 physics-only extraction
         },
     }
+    if sf_cdf is not None:
+        try:
+            _apply_chassis_diffs(svj["powertrain"]["differentials"], _chassis_mod.parse_diffs(sf_cdf))
+        except Exception as exc:               # a malformed file must not stop the car
+            print(f"  [WARN] differentials not read from the chassis file: {exc}")
     return _unify_suspension(svj)
 
 
