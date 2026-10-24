@@ -619,6 +619,14 @@ def _make_glb_from_mebs(
         # same X flip. Z keeps its sign (rear is +Z in both frames). The origin shift
         # to the front axle is applied on the part nodes, not the vertices.
         pos_np = np.array(pos, dtype=np.float32)
+        # A few vertices in some meshes (wheels, tyres, steering wheels of e.g. the
+        # Ferrari 250 TR) decode with a NaN coordinate, which glTF JSON cannot
+        # hold. Park them at the mesh centre and drop the triangles that use them.
+        bad_vert = ~np.isfinite(pos_np).all(axis=1)
+        if bad_vert.any():
+            pos_np[bad_vert] = pos_np[~bad_vert].mean(axis=0)
+            print(f"    [WARN] {part_name}: {int(bad_vert.sum())} non-finite vertices; "
+                  f"their triangles are dropped")
         pos_gl = np.column_stack([-pos_np[:, 0],
                                     pos_np[:, 1],
                                     pos_np[:, 2]]).astype(np.float32)
@@ -629,7 +637,7 @@ def _make_glb_from_mebs(
 
         acc_nrm: Optional[int] = None
         if nrm:
-            nrm_np = np.array(nrm, dtype=np.float32)
+            nrm_np = np.nan_to_num(np.array(nrm, dtype=np.float32))
             nrm_gl = np.column_stack([-nrm_np[:, 0],
                                         nrm_np[:, 1],
                                         nrm_np[:, 2]]).astype(np.float32)
@@ -662,8 +670,13 @@ def _make_glb_from_mebs(
                 continue
             # Ensure triangle-aligned length
             n = (len(face_list) // 3) * 3
-            idx_np = np.ascontiguousarray(
-                np.array(face_list[:n], dtype=np.uint16).reshape(-1, 3)[:, ::-1]).ravel()
+            tris = np.array(face_list[:n], dtype=np.uint16).reshape(-1, 3)
+            if bad_vert.any():
+                tris = tris[~bad_vert[tris].any(axis=1)]
+                n = tris.size
+                if n < 3:
+                    continue
+            idx_np = np.ascontiguousarray(tris[:, ::-1]).ravel()
             bv_idx = _add_bv(idx_np.tobytes(), gltf.ELEMENT_ARRAY_BUFFER)
             acc_idx = _add_acc(bv_idx, gltf.UNSIGNED_SHORT, n, "SCALAR")
 

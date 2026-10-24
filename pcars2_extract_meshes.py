@@ -555,14 +555,18 @@ Examples
                 _cleanup_dir(str(car_work))
     else:
         for car in car_names:
-            success = process_car(
-                car_name=car,
-                game_dir=game_dir,
-                pcarstools=pcarstools,
-                work_dir=work_dir,
-                cars_dir=cars_dir,
-                cleanup=cleanup,
-            )
+            try:
+                success = process_car(
+                    car_name=car,
+                    game_dir=game_dir,
+                    pcarstools=pcarstools,
+                    work_dir=work_dir,
+                    cars_dir=cars_dir,
+                    cleanup=cleanup,
+                )
+            except Exception as exc:    # one bad car must not end a 212-car batch
+                print(f"    [ERROR] {car}: {type(exc).__name__}: {exc}")
+                success = False
             if success:
                 ok += 1
             else:
