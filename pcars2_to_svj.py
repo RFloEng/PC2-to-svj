@@ -21,8 +21,9 @@ The pCARS2 physics archives must first be extracted with PCarsTools 1.1.4:
 Data coverage
 -------------
   SECTION                    SOURCE           STATUS
-  chassis.mass_total         cdfbin           ⚠ scan-based, verify against known specs
-  chassis.center_of_gravity  —                ❌ not located; zeros written
+  chassis.mass_total         mrdf             ✅ spec-sheet weight
+  chassis.inertia            cdfbin           ✅ Inertia; axis order inferred (roll < pitch < yaw)
+  chassis.center_of_gravity  mrdf + vdfm      ⚠ X from the rear weight fraction (cdfbin CGRearRange agrees); height not found
   powertrain.layout          —                ❌ defaults to FR
   powertrain.engine          edfbin           ✅ full RPM + torque curve
   powertrain.gearbox.ratios  gdfbin           ✅ validated on GT86, FR3.5, NSX
@@ -30,14 +31,21 @@ Data coverage
   powertrain.gearbox.type    driveline.rg     ✅ manual / sequential / amt / dct from the setup
   powertrain.clutch          driveline.rg     ✅ type + max torque
   powertrain.engine.inertia  driveline.rg     ⚠ crankshaft 1-D mass, unit assumed kg*m^2
-  suspension.*.spring.rate   sdfbin           ✅ block structure (N/mm→N/m); front/rear by KC0
-  suspension.*.damper        sdfbin (inferred) ⚠ read from the spring's triple as kN.s/m; estimated where absent
+  suspension.*.spring.rate   cdfbin           ✅ SpringRange + setting, times SpringMult (wheel rate)
+  suspension.*.damper        cdfbin           ✅ slow/fast bump and rebound, times DamperMult; knee speed assumed
+  suspension.*.alignment     cdfbin           ✅ default camber, toe, caster
+  suspension.*.wheel.mass    sdfbin           ✅ Mass and Inertia of the wheel and tyre
+  suspension.*.upright.mass  sdfbin           ✅ Mass of the non-rotating unsprung assembly
   suspension.*.wheel_center  vdfm             ✅ exact wheel-centre XYZ from physics
   suspension.*.topology      sdfbin+vdfm      ✅ link records, placed on the vdfm wheel centres (estimate when undecodable)
   suspension.*.wheel         hdtbin+vdfm      ✅ D from b31155cd; C from b1033b86; E from c0eaf58d
   suspension.*.tire_dims     vdfm             ✅ section_width + free_radius per axle
-  suspension.*.brake         —                ❌ defaults only
-  aerodynamics (_ext.)       cdfbin           ⚠ likely CdA; see _aerodynamics key
+  suspension.*.brake         cdfbin           ⚠ torque and bias only (kept as _ keys); disc size is a placeholder
+  steering                   cdfbin           ✅ ratio and lock; rack geometry is a placeholder
+  aerodynamics               —                ❌ Cd/Cl are placeholders (BodyDragBase kept raw)
+
+Field names: the chassis file keys its fields by hash; pcars2_hashnames.json maps
+them to names (from the Project CARS / AMS2 translation by JDougNY and GvsE).
 
 Usage
 -----
@@ -83,6 +91,10 @@ _spec_n = importlib.util.spec_from_file_location("pcars2_names", str(_HERE / "pc
 _names_mod = importlib.util.module_from_spec(_spec_n)
 _spec_n.loader.exec_module(_names_mod)
 rank_candidates = _names_mod.rank_candidates
+
+_spec_ch = importlib.util.spec_from_file_location("pcars2_chassis", str(_HERE / "pcars2_chassis.py"))
+_chassis_mod = importlib.util.module_from_spec(_spec_ch)
+_spec_ch.loader.exec_module(_chassis_mod)
 
 _spec_c = importlib.util.spec_from_file_location("pcars2_collision", str(_HERE / "pcars2_collision.py"))
 _collision_mod = importlib.util.module_from_spec(_spec_c)
@@ -558,39 +570,36 @@ def parse_sdf_links(sf_sdf: Optional[ShCBFile]) -> Dict[str, Any]:
     return {"links": links, "tops": tops, "axle_z": axle_z}
 
 
-_SPRING_TAG = bytes.fromhex("670b57ab21")      # <rate f32, N/mm> then the damper triple
-_TRIPLE_TAG = bytes.fromhex("bbb39f0ba302")    # three f32 after the rate
-_STATION_TAG = bytes.fromhex("feea2302")       # <x f32> 00 <z f32>: where the element sits
+_MASS_TAG = bytes.fromhex("670b57ab21")      # Mass (int, kg) of an unsprung body
+_INERTIA_TAG = bytes.fromhex("bbb39f0ba302")  # Inertia: three f32, kg.m^2
+_STATION_TAG = bytes.fromhex("feea2302")      # <x f32> 00 <z f32>: where the body sits
 
 
-def _parse_sdf_elements(sf_sdf: Optional[ShCBFile]) -> Dict[str, Dict[str, Any]]:
+def _parse_sdf_masses(sf_sdf: Optional[ShCBFile]) -> Dict[str, Dict[str, Any]]:
     """
-    Per-axle spring and damper from the sdfbin, located by position.
+    Unsprung masses and inertias per axle from the sdfbin.
 
-    The file holds, for each wheel, two elements: one at the wheel's lateral
-    position (the corner spring and damper) and one further inboard (probably the
-    anti-roll bar: a car with no rear bar, such as the Caterham 620R, has no
-    inboard element at the rear). Each is `rate (N/mm)`, a triple of f32, and
-    the station (x, z) that follows it; z < 0 is the front axle. Of the two, the
-    one with the larger first triple value is the corner element.
-
-    Returns {"front"|"rear": {"spring_Nm", "damper": (v1, v2, v3)}}, or {} when
-    the layout is not recognised. The triple is read as damping coefficients in
-    kN.s/m (v1 rebound, v2 bump), an inference that gives damping ratios of 0.23
-    to 0.50 (median 0.37) over 130 cars; it is not confirmed against the game.
+    Hash 670b57ab is `Mass` and bbb39f0b is `Inertia` in the game's field
+    vocabulary (pcars2_hashnames.json). The file lists, for each wheel, two
+    bodies: the wheel and tyre (the larger first inertia, spun about the
+    first axis) and the rest of the non-rotating unsprung assembly (hub,
+    upright, brake). Each is followed by its station (x, z); z < 0 is the front
+    axle. Returns {"front"|"rear": {"wheel": {mass, inertia}, "upright": {...}}}
+    or {} when the layout is not recognised (about 20 cars, whose files lack
+    the station records).
     """
     if sf_sdf is None:
         return {}
     b = sf_sdf._buf[sf_sdf.header.hdr_size: sf_sdf.header.sec_offset]
     events = []
-    o = b.find(_SPRING_TAG)
+    o = b.find(_MASS_TAG)
     while o != -1:
         if o + 9 <= len(b):
-            rate = struct.unpack_from("<f", b, o + 5)[0]
-            t = b.find(_TRIPLE_TAG, o, o + 40)
+            mass = struct.unpack_from("<f", b, o + 5)[0]
+            t = b.find(_INERTIA_TAG, o, o + 40)
             if t >= 0 and t + 18 <= len(b):
-                events.append((o, 0, rate, struct.unpack_from("<3f", b, t + 6)))
-        o = b.find(_SPRING_TAG, o + 1)
+                events.append((o, 0, mass, struct.unpack_from("<3f", b, t + 6)))
+        o = b.find(_MASS_TAG, o + 1)
     o = b.find(_STATION_TAG)
     while o != -1:
         if o + 13 <= len(b) and b[o + 8] == 0:
@@ -611,96 +620,17 @@ def _parse_sdf_elements(sf_sdf: Optional[ShCBFile]) -> Dict[str, Dict[str, Any]]
     out: Dict[str, Dict[str, Any]] = {}
     for axle, els in axles.items():
         els = [e for e in els if all(math.isfinite(v) for v in (e[0], *e[1]))
-               and 1.0 < e[0] < 500.0 and e[1][0] > 0]
+               and 1.0 <= e[0] < 200.0 and e[1][0] > 0]
         if not els:
             return {}
-        rate, trip = max(els, key=lambda e: e[1][0])
-        out[axle] = {"spring_Nm": round(rate * 1000.0), "damper": tuple(round(v, 4) for v in trip)}
+        wheel = max(els, key=lambda e: e[1][0])
+        rest = [e for e in els if e is not wheel]
+        entry: Dict[str, Any] = {"wheel": {"mass": wheel[0], "inertia": [round(v, 4) for v in wheel[1]]}}
+        if rest:
+            up = rest[0]
+            entry["upright"] = {"mass": up[0], "inertia": [round(v, 4) for v in up[1]]}
+        out[axle] = entry
     return out
-
-
-def _parse_sdf_physics(sf_sdf: Optional[ShCBFile]) -> Dict[str, Any]:
-    """
-    Per-axle spring rates (and dampers) from the sdfbin: by axle position when the
-    layout is recognised (_parse_sdf_elements), else the older block scan below.
-    """
-    el = _parse_sdf_elements(sf_sdf)
-    if el:
-        return {"front_spring_Nm": el["front"]["spring_Nm"], "rear_spring_Nm": el["rear"]["spring_Nm"],
-                "front_damper": el["front"]["damper"], "rear_damper": el["rear"]["damper"]}
-    return _parse_sdf_physics_blocks(sf_sdf)
-
-
-def _parse_sdf_physics_blocks(sf_sdf: Optional[ShCBFile]) -> Dict[str, float]:
-    """
-    Extract per-axle spring rates from sdfbin hash=670b57ab block structure.
-
-    The record body is a stream of 66-byte (road) or 69-byte (some race) repeating
-    blocks.  Each block starts with a spring-rate f32 (N/mm); a damper-reference
-    tag bytes (read as a ~777 float) appear 20 bytes later and locate the blocks.
-    Blocks[1] and blocks[3] form the two axle pairs; the axle with smaller KC0
-    (camber-gain ratio at base+76) is assigned as front.
-
-    Returns:
-        dict with keys  front_spring_Nm, rear_spring_Nm  (SI: N/m),
-        or empty dict when the record is absent / unparseable.
-    """
-    if sf_sdf is None:
-        return {}
-    rec = sf_sdf.get_one("670b57ab")
-    if not rec:
-        return {}
-    body = rec.body
-
-    # Locate damper-reference positions (770–790 Ns/m) at every byte offset
-    dpos: List[int] = []
-    for off in range(len(body) - 3):
-        v = struct.unpack_from("<f", body, off)[0]
-        if not (math.isnan(v) or math.isinf(v)) and 770.0 <= v <= 790.0:
-            dpos.append(off)
-    if not dpos:
-        return {}
-
-    strides = [dpos[i + 1] - dpos[i] for i in range(min(3, len(dpos) - 1))]
-    stride = strides[0] if strides else 0
-    if stride < 10:
-        return {}
-
-    # Parse blocks: spring at base, KC0 at base+76
-    blocks: List[Dict] = []
-    for dp in dpos[:6]:
-        base = dp - 20
-        if base < 0:
-            continue
-        spring_v = struct.unpack_from("<f", body, base)[0]
-        spring = (round(spring_v, 4)
-                  if not (math.isnan(spring_v) or math.isinf(spring_v))
-                  and 0.5 < spring_v < 500.0
-                  else None)
-
-        kc0: Optional[float] = None
-        k_off = base + 76
-        if k_off + 4 <= len(body):
-            kv = struct.unpack_from("<f", body, k_off)[0]
-            if not (math.isnan(kv) or math.isinf(kv)) and 0.01 < abs(kv) < 10.0:
-                kc0 = abs(kv)
-
-        blocks.append({"spring": spring, "kc0": kc0})
-
-    if len(blocks) < 4:
-        return {}
-
-    # Front = axle with smaller KC0 (less suspension camber gain)
-    kc1 = blocks[1].get("kc0") or 0.0
-    kc3 = blocks[3].get("kc0") or 0.0
-    front_blk, rear_blk = (1, 3) if kc1 <= kc3 else (3, 1)
-
-    result: Dict[str, float] = {}
-    for key, bi in [("front_spring_Nm", front_blk), ("rear_spring_Nm", rear_blk)]:
-        s = blocks[bi].get("spring")
-        if s and 1.0 < s < 500.0:
-            result[key] = round(s * 1000.0)   # N/mm → N/m
-    return result
 
 
 def _safe_shcb(path: Optional[str], label: str) -> Optional[ShCBFile]:
@@ -981,7 +911,8 @@ _DEFAULT_MASS = 1200.0
 
 
 def build_chassis(car: str, vdfm: Optional[Dict] = None,
-                  mrdf: Optional[Dict] = None) -> Dict:
+                  mrdf: Optional[Dict] = None,
+                  cdf: Optional[Dict] = None) -> Dict:
     """
     Build SVJ chassis.
 
@@ -1002,7 +933,7 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
         print(f"  [WARN] {car}: no mrdf mass; using default {_DEFAULT_MASS:.0f} kg")
 
     cg = [0.0, 0.0, 0.0]
-    frac = (mrdf or {}).get("rear_weight_fraction")
+    frac = (mrdf or {}).get("rear_weight_fraction") or (cdf or {}).get("cg_rear_fraction")
     if frac and vdfm:
         cg[0] = round(-frac * vdfm["wheelbase"], 4)
 
@@ -1019,6 +950,16 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
             "(placeholder 0). wheelbase/track: vdfm wheel centres."
         ),
     }
+    ig = (cdf or {}).get("inertia_game_axes")
+    if ig:
+        # The game's axes: X lateral, Y up, Z longitudinal. Inertia about X is
+        # pitch, about Y yaw, about Z roll.
+        chassis["inertia"] = {"Ixx": ig[2], "Iyy": ig[0], "Izz": ig[1],
+                              "Ixy": 0.0, "Ixz": 0.0, "Iyz": 0.0}
+        chassis["_inertia_source"] = ("pcars2_cdfbin Inertia (X, Y, Z of the game's axes: "
+                                      f"{ig[0]:g}, {ig[1]:g}, {ig[2]:g}); mapped to roll, pitch, yaw. "
+                                      "The axis order is inferred: roll comes out smallest and "
+                                      "yaw largest in every car.")
     if vdfm:
         chassis["wheelbase"]   = vdfm["wheelbase"]
         chassis["track_front"] = vdfm["track_front"]
@@ -1028,60 +969,29 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
 
 def build_aerodynamics(sf_cdf: Optional[ShCBFile], car: str) -> Dict:
     """
-    Build SVJ-schema-compliant aerodynamics section from cdfbin.
+    Aerodynamics placeholder with the one drag field the chassis file names.
 
-    Hash e0a125de (type 0xa2): stores a two-f32 pair.
-      - body[0]: cross-checked across cars as drag-related (0.20 for NSX 2017)
-      - body[4]: lift/downforce related (0.50 for NSX 2017)
-
-    Hash 6f70f3c7 (type 0xa2): first plausible f32 ≈ 0.70 for NSX 2017.
-      Cross-check: NSX Cd × frontal_area = 0.32 × 2.2 ≈ 0.70 → likely CdA (m²).
+    Earlier versions read a drag area from hash 6f70f3c7 and lift from e0a125de.
+    Those are FuelTankMotion and DiffuserStall (6f70f3c7 holds 560.0 and 0.7 in
+    every car), so every car came out with the same Cd. The chassis file does
+    have BodyDragBase, but its scale (a drag coefficient, or a multiplier of a
+    reference area) is not established, so Cd stays a flagged default and
+    BodyDragBase is kept raw.
     """
     DEFAULT_FRONTAL_AREA = 2.1   # m², typical sports car
-
-    if sf_cdf is None:
-        return {
-            "reference":    {"frontal_area": DEFAULT_FRONTAL_AREA},
-            "coefficients": {"Cd": 0.35, "Cl": 0.0},
-            "_note": "cdfbin not found — aerodynamic defaults only",
-        }
-
-    cd = cl = cda = None
-
-    r_aero = sf_cdf.get_one("e0a125de")
-    if r_aero and len(r_aero.body) >= 8:
-        cd = struct.unpack_from("<f", r_aero.body, 0)[0]
-        cl = struct.unpack_from("<f", r_aero.body, 4)[0]
-
-    r_cda = sf_cdf.get_one("6f70f3c7")
-    if r_cda and len(r_cda.body) >= 8:
-        cda = struct.unpack_from("<f", r_cda.body, 4)[0]  # offset 4 in type a2
-
-    # CdA (hash 6f70f3c7) appears to store Cd × frontal_area directly.
-    # NSX validation: 0.70 m² = 0.32 (real Cd) × 2.19 m² (real A) ✓
-    if cda and 0.2 < cda < 4.0:
-        cd_derived = round(cda / DEFAULT_FRONTAL_AREA, 4)
-    else:
-        cd_derived = 0.35   # generic fallback
-
-    cl_out = round(cl, 4) if (cl is not None and 0.0 <= abs(cl) <= 5.0) else 0.0
-
-    return {
-        "reference": {
-            "frontal_area": DEFAULT_FRONTAL_AREA,
-        },
-        "coefficients": {
-            "Cd": cd_derived,
-            "Cl": cl_out,
-        },
-        "_cl_sign_note": "Negative Cl = downforce",
-        "_cda_raw":      round(cda, 4) if cda else None,
-        "_note": (
-            "Cd derived from CdA (hash 6f70f3c7) / 2.1 m² default frontal area. "
-            "Validated: NSX CdA=0.70 -> Cd=0.333 (real=0.32). "
-            "Cl from hash e0a125de[4]; sign/scale requires per-car calibration."
-        ),
+    out: Dict[str, Any] = {
+        "reference":    {"frontal_area": DEFAULT_FRONTAL_AREA},
+        "coefficients": {"Cd": 0.35, "Cl": 0.0},
+        "_est": True,
+        "_note": ("Placeholder Cd and Cl: pCARS2 aero (wings, diffuser, body drag) is spread over "
+                  "many chassis fields whose scale is not established."),
     }
+    if sf_cdf is not None:
+        for r in sf_cdf.records:
+            if _chassis_mod.NAMES.get(r.hash_hex) == "BodyDragBase" and len(r.body) >= 4:
+                out["_body_drag_base_raw"] = round(struct.unpack_from("<f", r.body, 0)[0], 4)
+                break
+    return out
 
 
 def _tire_data(sf_hdt: Optional[ShCBFile], car: str, axle: str) -> Dict:
@@ -1237,6 +1147,7 @@ def _estimated_double_wishbone(wc: List[float], axle: str
 
 _ZETA_BUMP    = 0.30   # damping ratios for the estimated dampers
 _ZETA_REBOUND = 0.55
+_DAMPER_KNEE  = 0.1    # m/s: assumed speed where the slow damper slope turns into the fast one
 _MAX_JOINT_REACH = 0.45   # m: an upright joint farther than this from its wheel centre is rejected
 
 
@@ -1477,25 +1388,27 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                      car: str,
                      vdfm: Optional[Dict] = None,
                      mass_kg: Optional[float] = None,
-                     rear_fraction: Optional[float] = None) -> Dict:
+                     rear_fraction: Optional[float] = None,
+                     chassis: Optional[Dict] = None) -> Dict:
     """
     Build SVJ suspension as FL/FR/RL/RR per-corner dicts.
 
-    Spring rates: extracted from sdfbin hash=670b57ab block structure.
-      Each block starts with spring rate (N/mm); blocks are located by the
-      repeating axle-reference tag whose last bytes read as a ~777 float at
-      block+20 (a layout marker, not a damper value).  Front/rear assignment
-      uses KC0 (camber-gain ratio): lower KC = front axle.
-    Damper: the sdfbin damper data is not decoded; curves are estimates from a
-      damping ratio, the spring rate and the corner mass (flagged _est).
+    Springs, dampers, static camber/toe/caster and tyre pressure: the chassis
+      file (`chassis`, from pcars2_chassis.parse_chassis). Each is a range
+      (start, step, count) plus the default setting; wheel rates are the
+      spring and damper rates times the file's SpringMult / DamperMult.
+    Unsprung masses and inertias (wheel, upright): the sdfbin (_parse_sdf_masses).
     Topology: decoded from the sdfbin link records where the layout is
       recognised (_real_topologies); otherwise a flagged double-wishbone estimate.
 
+    Where a value is missing it is estimated and flagged `_est`.
     Tire and brake data are embedded within each corner per the SVJ schema.
     """
-    # Real spring rates from sdfbin block structure (N/m)
-    sdf_physics = _parse_sdf_physics(sf_sdf)
-    # Where the sdfbin has no rate, derive one from the corner's sprung mass
+    sdf_masses = _parse_sdf_masses(sf_sdf)
+    cc = (chassis or {}).get("corners") or []
+    cc_axle = {"front": cc[0] if len(cc) >= 4 and cc[0].get("spring_Nm") else None,
+               "rear":  cc[2] if len(cc) >= 4 and cc[2].get("spring_Nm") else None}
+    # Where the chassis file has no rate, derive one from the corner's sprung mass
     # and a typical ride frequency (flagged), not one number for every car.
     mass = mass_kg or _DEFAULT_MASS
     rf = rear_fraction if rear_fraction else 0.5
@@ -1503,19 +1416,17 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
         m_corner = mass * axle_fraction / 2 * 0.88      # ~12 % unsprung
         return round(m_corner * (2 * math.pi * freq_hz) ** 2, -2)
     spring_src = {}
-    if "front_spring_Nm" in sdf_physics:
-        front_spring, spring_src["front"] = sdf_physics["front_spring_Nm"], "pcars2_sdfbin"
-    else:
-        front_spring, spring_src["front"] = _ride_rate(1 - rf, 1.5), "estimated_ride_frequency"
-    if "rear_spring_Nm" in sdf_physics:
-        rear_spring, spring_src["rear"] = sdf_physics["rear_spring_Nm"], "pcars2_sdfbin"
-    else:
-        rear_spring, spring_src["rear"] = _ride_rate(rf, 1.7), "estimated_ride_frequency"
+    rates = {}
+    for axle, frac, hz in (("front", 1 - rf, 1.5), ("rear", rf, 1.7)):
+        c = cc_axle[axle]
+        if c:
+            rates[axle] = round(c["spring_Nm"] * (c.get("spring_mult") or 1.0))
+            spring_src[axle] = "pcars2_cdfbin"
+        else:
+            rates[axle], spring_src[axle] = _ride_rate(frac, hz), "estimated_ride_frequency"
+    front_spring, rear_spring = rates["front"], rates["rear"]
 
-    # Dampers: the sdfbin damper values are not decoded (the "777 N·s/m
-    # constant" an earlier version used was a misread of the repeating
-    # axle-reference tag bytes, not damper data). Curves are estimated from a
-    # damping ratio and the corner's spring rate and sprung mass, at the wheel.
+    # Dampers: from the chassis file when present, else estimated from a damping ratio.
     front_mc = mass * (1 - rf) / 2 * 0.88
     rear_mc  = mass * rf / 2 * 0.88
 
@@ -1528,6 +1439,7 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                 tire: Dict) -> Dict:
         tag  = axle[0].upper() + side[0].upper()   # FL, FR, RL, RR
         node = f"upright_{tag.lower()}"
+        ccx = cc_axle[axle]
 
         # ── Wheel-centre position from vdfm (SVJ SAE J670, Z down) ───────────
         if vdfm and tag in vdfm:
@@ -1591,11 +1503,28 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             "_pressure_nominal":  tire["pressure_nominal"],
             "_note":              tire_src_note,
         }
+        sm = sdf_masses.get(axle, {})
+        if sm.get("wheel"):
+            wheel_dict["mass"] = round(sm["wheel"]["mass"], 3)
+            wheel_dict["rotational_inertia"] = sm["wheel"]["inertia"][0]
+            wheel_dict["_mass_source"] = ("pcars2_sdfbin (Mass, Inertia of the wheel and tyre; "
+                                          "the first inertia is the spin axis)")
+        if ccx and ccx.get("pressure_kpa"):
+            wheel_dict["_pressure_nominal"] = round(ccx["pressure_kpa"] * 1000.0)
         if free_radius is not None:
             wheel_dict["_free_radius"]   = free_radius
             wheel_dict["_section_width"] = section_width
             wheel_dict["_tire_source"]   = "pcars2_vdfm"
 
+        alignment = {}
+        if ccx and chassis:
+            toe = chassis.get("toe_front_deg" if axle == "front" else "toe_rear_deg")
+            alignment = {k: round(math.radians(v), 6) for k, v in (
+                ("camber", ccx.get("camber_deg")), ("toe", toe),
+                ("caster", chassis.get("caster_deg") if axle == "front" else None)) if v is not None}
+            if alignment:
+                alignment["_note"] = ("Default setup values from the chassis file (range start + "
+                                      "setting x step), degrees converted to radians.")
         strut = next((l for l in links if l["type"] == "strut"), None)
         spring_d = {
             "type":    "coil",
@@ -1603,42 +1532,54 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
             "_source": spring_src[axle],
         }
         c_crit = 2.0 * math.sqrt(spring * m_corner)            # N·s/m at the wheel
-        game_c = sdf_physics.get(f"{axle}_damper")
-        if game_c:
-            # Triple stored with the corner spring, read as kN·s/m (inferred, see
-            # _parse_sdf_elements): first value rebound, second bump.
-            c_reb, c_bump = round(game_c[0] * 1000.0, 1), round(game_c[1] * 1000.0, 1)
-            zr, zb = round(c_reb / c_crit, 3), round(c_bump / c_crit, 3)
-            note = ("Read from the sdfbin triple stored with the corner spring, taken as damping "
-                    "coefficients in kN.s/m at the wheel (first value rebound, second bump). "
-                    "This reading is inferred, not confirmed against the game: it gives damping "
-                    "ratios of 0.23-0.50 (median 0.37) over 130 cars. Curves are linear.")
-            src = "pcars2_sdfbin_inferred"
-            x_p = {"damping_source": src, "sdfbin_triple_kNs_per_m": list(game_c),
-                   "damping_ratio_bump": zb, "damping_ratio_rebound": zr}
+        if ccx and ccx.get("damper") and len(ccx["damper"]) == 4:
+            dm = ccx.get("damper_mult") or 1.0
+            sb, fb, sr, fr = (ccx["damper"][k] * dm for k in
+                              ("SlowBump", "FastBump", "SlowRebound", "FastRebound"))
+            vk = _DAMPER_KNEE                                   # m/s, slow -> fast
+
+            def _curve(slow: float, fast: float) -> List[List[float]]:
+                return [[0.0, 0.0], [vk, round(slow * vk, 1)],
+                        [1.0, round(slow * vk + fast * (1.0 - vk), 1)]]
+            note = ("Slow and fast bump and rebound coefficients (N.s/m) from the chassis file, "
+                    "times DamperMult, as force against wheel speed (reference 'wheel'). The file "
+                    f"gives the two slopes; the speed where they meet is assumed {vk} m/s. "
+                    "The raw bump/rebound transition values are kept in x_pcars2.")
+            src = "pcars2_cdfbin"
+            x_p = {"damping_source": src,
+                   "slow_bump": round(sb, 1), "fast_bump": round(fb, 1),
+                   "slow_rebound": round(sr, 1), "fast_rebound": round(fr, 1),
+                   "damper_mult": dm, "transition_raw": ccx.get("transition"),
+                   "damping_ratio_bump": round(sb / c_crit, 3),
+                   "damping_ratio_rebound": round(sr / c_crit, 3)}
+            bump_curve, reb_curve = _curve(sb, fb), _curve(sr, fr)
         else:
             c_bump, c_reb = round(_ZETA_BUMP * c_crit, 1), round(_ZETA_REBOUND * c_crit, 1)
-            note = ("Not from the game: no damper triple found in the sdfbin. Curves are linear, at "
+            note = ("Not from the game: no damper data in the chassis file. Curves are linear, at "
                     "the wheel (reference 'wheel'): c = zeta x 2 x sqrt(spring.rate x corner sprung "
                     f"mass), zeta {_ZETA_BUMP} bump / {_ZETA_REBOUND} rebound (typical values).")
             src = "estimated_damping_ratio"
             x_p = {"damping_source": src, "damping_ratio_bump": _ZETA_BUMP,
                    "damping_ratio_rebound": _ZETA_REBOUND}
+            bump_curve = [[0.0, 0.0], [0.5, round(c_bump * 0.5, 1)], [1.0, c_bump]]
+            reb_curve = [[0.0, 0.0], [0.5, round(c_reb * 0.5, 1)], [1.0, c_reb]]
         damper_d = {
             "type": "twin_tube",
             # Force at the wheel against wheel speed; no motion_ratio needed.
             "reference": "wheel",
-            # [velocity_m_s, force_N] pairs; force = coefficient × velocity
-            "bump_curve":    [[0.0, 0.0], [0.5, round(c_bump * 0.5, 1)], [1.0, c_bump]],
-            "rebound_curve": [[0.0, 0.0], [0.5, round(c_reb * 0.5, 1)], [1.0, c_reb]],
+            # [velocity_m_s, force_N] pairs
+            "bump_curve":    bump_curve,
+            "rebound_curve": reb_curve,
             "_est": True,
             "_source": src,
             "_note": note,
             "x_pcars2": x_p,
         }
-        if spring_src[axle] != "pcars2_sdfbin":
+        if ccx and ccx.get("spring_mult"):
+            spring_d["x_pcars2"] = {"rate_at_spring": ccx["spring_Nm"], "spring_mult": ccx["spring_mult"]}
+        if spring_src[axle] != "pcars2_cdfbin":
             spring_d["_est"] = True
-            spring_d["_note"] = ("No spring rate in the sdfbin: derived from the car mass, "
+            spring_d["_note"] = ("No spring rate in the chassis file: derived from the car mass, "
                                  "weight split and a typical ride frequency "
                                  "(1.5 Hz front, 1.7 Hz rear).")
         if strut is not None:
@@ -1653,13 +1594,16 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                 "system_type": system_type,
                 "upright": {
                     "id":       node,
-                    "mass":     12.0,
+                    "mass":     round(sm["upright"]["mass"], 3) if sm.get("upright") else 12.0,
+                    **({"_mass_source": "pcars2_sdfbin (non-rotating unsprung assembly)"}
+                       if sm.get("upright") else {"_est": True}),
                     "hardpoints": hardpoints,
                 },
                 "links": links,
                 **topo_extra,
             },
             "wheel": wheel_dict,
+            **({"alignment": alignment} if alignment else {}),
             "spring": spring_d,
             "damper": damper_d,
             "brake": {
@@ -1684,9 +1628,10 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
     }
 
 
-def build_steering(car: str) -> Dict:
-    """Placeholder steering section (pCARS2 steering data not yet decoded)."""
-    return {
+def build_steering(car: str, cdf: Optional[Dict] = None) -> Dict:
+    """Steering ratio and lock from the chassis file; the rack geometry stays a placeholder."""
+    ratio, lock = (cdf or {}).get("steering_ratio"), (cdf or {}).get("steering_lock_deg")
+    out: Dict[str, Any] = {
         "type":              "rack_and_pinion",
         "rack_position":     [0.0, 0.0, 0.0],
         "rack_travel":       0.08,
@@ -1696,6 +1641,17 @@ def build_steering(car: str) -> Dict:
         "_est": True,
         "_note": "Placeholder — steering data not yet located in pCARS2 files.",
     }
+    if ratio and lock:
+        wheel_deg = 2.0 * lock * ratio                      # lock to lock at the steering wheel
+        out.update({
+            "overall_ratio": round(ratio, 3),
+            "lock_to_lock": round(math.radians(wheel_deg), 4),
+            "lock_to_lock_turns": round(wheel_deg / 360.0, 3),
+            "_note": ("overall_ratio from SteeringRatioRange and lock_to_lock from SteeringLockRange "
+                      "(road wheel angle, degrees) in the chassis file; lock to lock = 2 x lock x "
+                      "ratio. rack_position and rack_travel are placeholders."),
+        })
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1869,9 +1825,18 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     else:
         print("  [WARN] driveline: no entry for this car - gearbox type and clutch use defaults")
 
+    chassis_data: Dict[str, Any] = {}
+    if sf_cdf is not None:
+        try:
+            chassis_data = _chassis_mod.parse_chassis(sf_cdf)
+        except Exception as exc:                 # a malformed file must not stop the car
+            print(f"  [WARN] chassis file not decoded: {exc}")
+    if chassis_data.get("corners"):
+        print("  [OK] chassis: springs, dampers, inertia, alignment from the cdfbin")
     suspension = build_suspension(sf_sdf, sf_hdt, car, vdfm=vdfm_data,
                                   mass_kg=mrdf_data.get("mass_kg"),
-                                  rear_fraction=mrdf_data.get("rear_weight_fraction"))
+                                  rear_fraction=mrdf_data.get("rear_weight_fraction"),
+                                  chassis=chassis_data)
 
     # Build top-level tires section from suspension corner data
     fl_wheel = suspension.get("FL", {}).get("wheel", {})
@@ -1909,6 +1874,13 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         "corners":  brakes_corners,
         "_note": "Brake disc dimensions estimated; type/size not decoded from pCARS2 physics.",
     }
+    cc = chassis_data.get("corners") or []
+    if len(cc) >= 4 and cc[0].get("brake_torque_Nm") and cc[2].get("brake_torque_Nm"):
+        brakes["_max_brake_torque_Nm"] = {"front": cc[0]["brake_torque_Nm"], "rear": cc[2]["brake_torque_Nm"]}
+        if chassis_data.get("brake_bias_rear") is not None:
+            brakes["_brake_bias_rear"] = round(chassis_data["brake_bias_rear"], 3)
+        brakes["_chassis_file_note"] = ("BrakeTorque per axle and RearBrakeRange (rear share of "
+                                        "the brake force) from the chassis file; no SVJ field yet.")
 
     metadata = _metadata(
         car=car, extracted_root=extracted_root,
@@ -1946,8 +1918,8 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     svj: Dict[str, Any] = {
         "_metadata": metadata,
         "vehicle_info": vehicle_info,
-        "chassis":      build_chassis(car, vdfm=vdfm_data, mrdf=mrdf_data),
-        "steering":     build_steering(car),
+        "chassis":      build_chassis(car, vdfm=vdfm_data, mrdf=mrdf_data, cdf=chassis_data),
+        "steering":     build_steering(car, chassis_data),
         "suspension":   suspension,
         "powertrain": {
             "layout":  layout,

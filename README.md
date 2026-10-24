@@ -87,11 +87,12 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Mass, drivetrain (RWD/AWD/FWD), displacement, front/rear weight split | car-select spec sheet (`.mrdf`) |
 | Wheel centres, wheelbase, track, tyre width and radius | vehicle descriptor (`.vdfm`) |
 | Gearbox type, clutch type and torque capacity, crankshaft inertia, AWD diff layout (205 of 212 cars) | driveline setup (`driveline.rg`), matched by car name |
-| Spring rates | suspension file (`.sdfbin`); where it has none, derived from car mass and a typical ride frequency (flagged `_est`) |
+| Spring and damper rates, default camber, toe and caster, tyre pressure | chassis file (`.cdfbin`): range start + default setting x step, times the file's spring and damper multipliers (wheel rates). 202 of 212 cars; the rest are estimated and flagged `_est`. The speed where the slow and fast damper slopes meet is assumed (0.1 m/s) |
+| Inertia, CG fore/aft, steering ratio and lock, brake torque and bias | chassis file (`.cdfbin`). The inertia axis order is inferred; the CG agrees with the spec-sheet weight split in 148 of 208 cars (within 1 %) |
+| Wheel and upright mass and inertia | suspension file (`.sdfbin`), 126 cars; the others keep estimates |
 | Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |
-| Drag coefficient | chassis file (`.cdfbin`); tentative |
-| **Estimated:** suspension geometry where it couldn't be decoded, damper curves for every car (the game's damper data is not decoded), Pacejka B, brakes, steering, CG height, engine position of RWD cars, differential type | — |
+| **Estimated:** suspension geometry where it couldn't be decoded, Pacejka B, brake disc size, steering rack geometry, CG height, aerodynamics (Cd and Cl are placeholders), engine position of RWD cars, differential type | — |
 
 Cars that don't ship their own physics file (for example, many have no tyre file of their own) fall back to the file of a true base variant of the same car when one exists, such as `toyota_gt86_rb` using `toyota_gt86`. Otherwise they use defaults. A different model's data is never borrowed.
 
@@ -118,6 +119,8 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 | `svj_migrate/` | The SVJ standard's suspension migration, vendored (refresh with `vendor_svj_migrate.py`) |
 | `pcars2_to_svj.py` | Physics → SVJ converter |
 | `pcars2_extract_meshes.py` | Per-car model extraction pipeline |
+| `pcars2_chassis.py` | Chassis file (`.cdfbin`) reader: springs, dampers, inertia, alignment, brakes, steering |
+| `pcars2_hashnames.json` | Hash → field name map for those files |
 | `pcars2_collision.py` | Collision XML → hinged parts, joints, poses and collision proxies |
 | `meb_to_glb.py` | Builds GLB files from `.meb` mesh parts |
 | `meb_reader.py` | `.meb` mesh format reader |
@@ -127,6 +130,7 @@ Cars that don't ship their own physics file (for example, many have no tyre file
 ## Credits
 
 - [PCarsTools](https://github.com/Nenkai/PCarsTools) by Nenkai, for archive extraction and model decryption. The `.meb` reader follows its binary templates.
+- The Project CARS / AMS2 chassis translation by JDougNY, revised for AMS2 by GvsE ([AMS2 modding docs](https://github.com/mikevapour/ams2-modding-docs)). `pcars2_hashnames.json` maps the chassis file's hashed field names from it, and the field encoding in `pcars2_chassis.py` follows it.
 
 ## License
 
