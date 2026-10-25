@@ -23,7 +23,7 @@ Data coverage
   SECTION                    SOURCE           STATUS
   chassis.mass_total         mrdf             ✅ spec-sheet weight
   chassis.inertia            cdfbin           ✅ Inertia; axis order inferred (roll < pitch < yaw)
-  chassis.center_of_gravity  mrdf + vdfm      ⚠ X from the rear weight fraction (cdfbin CGRearRange agrees); height not found
+  chassis.center_of_gravity  mrdf+cdfbin      ⚠ X from the rear weight fraction (cdfbin CGRearRange agrees); Z = CGHeight + ride height (assumed plane)
   powertrain.layout          —                ❌ defaults to FR
   powertrain.engine          edfbin           ✅ full RPM + torque curve
   powertrain.gearbox.ratios  gdfbin           ✅ validated on GT86, FR3.5, NSX
@@ -983,6 +983,18 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
     if frac and vdfm:
         cg[0] = round(-frac * vdfm["wheelbase"], 4)
 
+    cg_note = ""
+    cgh = (cdf or {}).get("cg_height_m")
+    rides = [c["ride_height_m"] for c in (cdf or {}).get("corners", []) if c.get("ride_height_m")]
+    if cgh and rides:
+        # CGHeight is the body mass height above a reference plane that the file does not name.
+        # Taking it as the underside of the body at ride height puts the GT86 at 0.43 m, a road
+        # car's usual figure; taking it as the ground would put it at 0.31 m.
+        cg[2] = round(-(cgh + sum(rides) / len(rides)), 4)
+        cg_note = (f" Z: CGHeight {cgh:.3f} m (body mass, excluding fuel) plus the mean ride height "
+                   f"{sum(rides) / len(rides):.3f} m; the reference plane is assumed to be the body "
+                   "underside at ride height (estimate).")
+
     chassis: Dict[str, Any] = {
         "mass_total":        mass,
         "center_of_gravity": cg,
@@ -992,8 +1004,8 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
         "_note": (
             "mass_total: game spec-sheet weight from statistics .mrdf (default if absent). "
             "center_of_gravity: X from mrdf rear weight fraction x vdfm wheelbase "
-            "(0 if either is missing); Y centreline; Z height not stored by pCARS2 "
-            "(placeholder 0). wheelbase/track: vdfm wheel centres."
+            "(0 if either is missing); Y centreline; Z height from the chassis file when "
+            "present (0 otherwise). wheelbase/track: vdfm wheel centres." + cg_note
         ),
     }
     ig = (cdf or {}).get("inertia_game_axes")

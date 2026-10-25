@@ -100,6 +100,14 @@ def parse_chassis(sf) -> Dict[str, Any]:
     two are the front axle, the last two the rear).
     """
     out: Dict[str, Any] = {"corners": []}
+    # CGHeight is a one-value token (prefix 0x22, a float) that the record splitter leaves
+    # inside the body of another record, so look for it in the raw file.
+    inv = {v: k for k, v in NAMES.items()}
+    raw = getattr(sf, "_buf", b"")
+    tag = bytes([0x22]) + bytes.fromhex(inv.get("CGHeight", "")) if inv.get("CGHeight") else b""
+    at = raw.find(tag) if tag else -1
+    if at >= 0 and at + 9 <= len(raw):
+        out["cg_height_m"] = struct.unpack_from("<f", raw, at + 5)[0]
     corner: Optional[Dict[str, Any]] = None
     for r in sf.records:
         name = NAMES.get(r.hash_hex, "")
