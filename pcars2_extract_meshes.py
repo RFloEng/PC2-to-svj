@@ -291,6 +291,51 @@ def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
         json.dump(svj, f, indent=2, ensure_ascii=False)
 
 
+def extract_car_physics(car_name: str, game_dir: str, pcarstools: str,
+                        work_dir: str, out_root: str) -> bool:
+    """
+    Keep the physics files a car really uses.
+
+    Each car's archive (Pakfiles/Vehicles/<Car>.bff) carries a vehicles/physics
+    folder with exactly the chassis, engine, gearbox, suspension, turbo and
+    collision files that car loads, including files it shares with another car
+    (the Acura NSX 2017 loads acura_nsx_gt3.sdfbin, the Aston Martin DB11 loads
+    aston_martin_vantage_gt4.sdfbin). The common physics archives hold only some
+    of them, so looking files up by the car's name leaves ~80 cars without a
+    suspension file. This copies that folder to <out_root>/<car>/ (chassis/,
+    engines/, gearbox/, suspension/, ...) and returns True on success.
+    """
+    import shutil
+    vehicles_bff = Path(game_dir) / "Pakfiles" / "Vehicles"
+    cands = _bff_candidates(car_name, vehicles_bff)
+    if not cands:
+        print(f"    [SKIP] no archive for {car_name}")
+        return False
+    work = Path(work_dir) / f"{car_name}_phys"
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        if not _run_pcarstools(pcarstools, str(cands[0]), game_dir, str(work)):
+            return False
+        phys = next((d for d in work.rglob("physics") if (d / "chassis").is_dir()), None)
+        if phys is None:
+            print(f"    [WARN] {cands[0].name}: no physics folder")
+            return False
+        # The archive must belong to this car: its chassis file carries the car's name.
+        chassis = [f.stem.lower() for f in (phys / "chassis").glob("*.cdfbin")]
+        want = {car_name.lower(), cands[0].stem.lower()}
+        import difflib
+        if chassis and not (set(chassis) & want) and not any(
+                difflib.SequenceMatcher(None, c, w).ratio() >= 0.8 for c in chassis for w in want):
+            print(f"    [WARN] {cands[0].name}: chassis {chassis} does not match {car_name}; not used")
+            return False
+        dest = Path(out_root) / car_name
+        shutil.rmtree(dest, ignore_errors=True)
+        shutil.copytree(phys, dest)
+        return True
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-car pipeline
 # ─────────────────────────────────────────────────────────────────────────────

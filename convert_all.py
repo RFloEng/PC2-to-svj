@@ -7,6 +7,7 @@ Runs the whole pipeline against your own Project CARS 2 install:
 
   1. finds the game (or use --game)
   2. unpacks the physics archives with PCarsTools (skipped when already unpacked)
+     and keeps the physics files each car's own archive loads
   3. converts every car's physics to an SVJ file
   4. extracts each car's 3D model (GLB with textures), its collision hulls and
      hinges, and links them into the SVJ file
@@ -178,6 +179,26 @@ def main() -> None:
         die("No cars to convert.")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+
+    # Each car's own archive holds the physics files it really loads (some are shared with
+    # another car and are not in the common physics archives): keep them, once.
+    own = PCARS / "car_physics"
+    todo = [c for c in cars if args.reextract or not (own / c / "chassis").is_dir()]
+    if todo:
+        step(f"Extracting the physics files of each car's own archive: {len(todo)} cars (about 1 s each)")
+        ensure_tools(game)
+        meshes = load("pcars2_extract_meshes")
+        failed_own = []
+        for car in todo:
+            try:
+                good = meshes.extract_car_physics(car, str(game), str(TOOLS_EXE), str(PCARS / "mesh_work"), str(own))
+            except Exception as exc:
+                print(f"    [ERROR] {car}: {type(exc).__name__}: {exc}")
+                good = False
+            if not good:
+                failed_own.append(car)
+        if failed_own:
+            print(f"  [WARN] no own archive for: {', '.join(failed_own)} (looked up by name instead)")
 
     step(f"Converting physics: {len(cars)} cars -> {out}")
     ok, failed, invalid = [], [], []

@@ -197,6 +197,8 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
         "vehicles":   d(pers / "vehicles"),   # .vdfm master descriptors
         "statistics": d(pers / "statistics"), # .mrdf car-select spec sheets
         "driveline":  d(pers / "driveline"),  # driveline.rg (text, per-car setups)
+        # The files each car's own archive loads (extract_car_physics); preferred when present.
+        "car_physics": d(root.parent / "car_physics"),
     }
 
 
@@ -407,6 +409,12 @@ def _car_file(dirs: Dict[str, Optional[str]], subdir: str,
     like 'aston_martin_db11' with the 1959 DBR1's suspension or 'ford_gtlm'
     with the Bronco's tyres; a missing file now falls back to defaults.
     """
+    own = dirs.get("car_physics")
+    if own:
+        od = Path(own) / car / subdir
+        files = sorted(od.glob(f"*.{ext}")) if od.is_dir() else []
+        if files:
+            return str(next((f for f in files if f.stem.lower() == car.lower()), files[0]))
     d = dirs.get(subdir)
     if not d:
         return None
