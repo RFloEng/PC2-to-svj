@@ -92,10 +92,11 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Anti-roll bar rate | chassis file (`.cdfbin`), checked on the GT86 (55 and 20 N/mm). `bar_rate` is the roll stiffness that wheel rate gives across the track, arm geometry being unknown |
 | Inertia, CG fore/aft, steering ratio and lock, brake torque and bias | chassis file (`.cdfbin`). The inertia axis order is inferred; the CG agrees with the spec-sheet weight split in 148 of 208 cars (within 1 %) |
 | CG height | chassis file (`.cdfbin`) `CGHeight` plus the mean ride height, in 209 cars. The file names no reference plane; the underside of the body at ride height fits best: against Assetto Corsa's CG height for 52 cars matched by name and mass it is 2 cm low on average (5 cm scatter), while `CGHeight` alone is 12 cm low |
+| Aero model | chassis file (`.cdfbin`): body, wing, diffuser, radiator and brake-duct fields kept by name in `aerodynamics.x_pcars2.aero_model`. The game stores no drag coefficient (forward drag is computed at run time), so `Cd` and `Cl` stay flagged placeholders. Against Assetto Corsa's body drag area for 52 matched cars, `BodyDragBase` correlates at only r = 0.29, so no scale is claimed |
 | Wheel and upright mass and inertia | suspension file (`.sdfbin`), 126 cars; the others keep estimates |
 | Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |
-| **Estimated:** suspension geometry where it couldn't be decoded, Pacejka B, brake disc size, steering rack geometry, aerodynamics (Cd and Cl are placeholders), engine position of RWD cars, differential type | — |
+| **Estimated:** suspension geometry where it couldn't be decoded, Pacejka B, brake disc size, steering rack geometry, Cd and Cl, engine position of RWD cars, differential type | — |
 
 Cars that don't ship their own physics file (for example, many have no tyre file of their own) fall back to the file of a true base variant of the same car when one exists, such as `toyota_gt86_rb` using `toyota_gt86`. Otherwise they use defaults. A different model's data is never borrowed.
 

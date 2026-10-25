@@ -211,3 +211,36 @@ def parse_diffs(sf) -> Dict[str, Dict[str, Any]]:
         elif sub == "ViscousLockRange":
             slot["viscous_lock"] = vals[0] + (_first_setting(st) or 0) * vals[1]
     return out
+
+
+_AERO_PREFIXES = ("FW", "RW", "Body", "Diffuser", "Radiator", "BrakeDuct")
+
+
+def parse_aero(sf) -> Dict[str, Any]:
+    """
+    The aero fields of the chassis file by their documented names: body, front
+    and rear wing, diffuser, radiator and brake ducts. Vector fields come as
+    lists (a missing component of a vector is 0), one-value fields as numbers.
+
+    The game keeps forces as coefficients of speed squared (the Lexus LFA's
+    BodyFore z of 0.435 is about half the air density times its drag area), and
+    computes the forward drag at run time from BodyDragBase and the ride
+    heights, so BodyFore and RWFore store 0 there. Names ending in Setting or
+    Range are setup choices, not coefficients, and are left out.
+    """
+    out: Dict[str, Any] = {}
+    for r in sf.records:
+        name = NAMES.get(r.hash_hex, "")
+        if not name.startswith(_AERO_PREFIXES) or name.endswith(("Setting", "Range")) and not name.startswith(("Radiator", "BrakeDuct", "FWRange", "RWRange")):
+            continue
+        if r.type_code in (0x21, 0x22) and len(r.body) >= 4:
+            v = struct.unpack_from("<i" if r.type_code == 0x21 and False else "<f", r.body, 0)[0]
+            if v == v and abs(v) < 1e9:
+                out.setdefault(name, round(float(v), 6))
+            continue
+        d = decode_values(r.type_code, r.body)
+        if d:
+            vals = [round(float(v), 6) for v in d[0] if isinstance(v, (int, float)) and v == v]
+            if vals:
+                out.setdefault(name, vals)
+    return out

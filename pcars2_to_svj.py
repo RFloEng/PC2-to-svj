@@ -42,7 +42,7 @@ Data coverage
   suspension.*.tire_dims     vdfm             ✅ section_width + free_radius per axle
   suspension.*.brake         cdfbin           ⚠ torque and bias only (kept as _ keys); disc size is a placeholder
   steering                   cdfbin           ✅ ratio and lock; rack geometry is a placeholder
-  aerodynamics               —                ❌ Cd/Cl are placeholders (BodyDragBase kept raw)
+  aerodynamics               cdfbin           ⚠ the game's aero model kept by name in x_pcars2; Cd/Cl are placeholders
 
 Field names: the chassis file keys its fields by hash; pcars2_hashnames.json maps
 them to names (from the Project CARS / AMS2 translation by JDougNY and GvsE).
@@ -1030,28 +1030,41 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
 
 def build_aerodynamics(sf_cdf: Optional[ShCBFile], car: str) -> Dict:
     """
-    Aerodynamics placeholder with the one drag field the chassis file names.
+    Aerodynamics: Cd and Cl are flagged placeholders; the game's own aero model is
+    kept as decoded under x_pcars2.
 
     Earlier versions read a drag area from hash 6f70f3c7 and lift from e0a125de.
     Those are FuelTankMotion and DiffuserStall (6f70f3c7 holds 560.0 and 0.7 in
-    every car), so every car came out with the same Cd. The chassis file does
-    have BodyDragBase, but its scale (a drag coefficient, or a multiplier of a
-    reference area) is not established, so Cd stays a flagged default and
-    BodyDragBase is kept raw.
+    every car), so every car came out with the same Cd. The game does not store
+    a drag coefficient: it computes the forward drag at run time from
+    BodyDragBase and the ride heights, with a formula that is not in the files
+    (BodyFore z, where it would sit, is 0 in all 209 cars). Against Assetto
+    Corsa's body drag area for 52 matched cars, BodyDragBase correlates only at
+    r = 0.29, so no scale is claimed.
     """
     DEFAULT_FRONTAL_AREA = 2.1   # m², typical sports car
     out: Dict[str, Any] = {
         "reference":    {"frontal_area": DEFAULT_FRONTAL_AREA},
         "coefficients": {"Cd": 0.35, "Cl": 0.0},
         "_est": True,
-        "_note": ("Placeholder Cd and Cl: pCARS2 aero (wings, diffuser, body drag) is spread over "
-                  "many chassis fields whose scale is not established."),
+        "_note": ("Placeholder Cd and Cl: the game computes drag at run time and stores no drag "
+                  "coefficient. Its aero model (body, wings, diffuser, radiator, brake ducts) is "
+                  "kept in x_pcars2.aero_model."),
     }
     if sf_cdf is not None:
-        for r in sf_cdf.records:
-            if _chassis_mod.NAMES.get(r.hash_hex) == "BodyDragBase" and len(r.body) >= 4:
-                out["_body_drag_base_raw"] = round(struct.unpack_from("<f", r.body, 0)[0], 4)
-                break
+        try:
+            model = _chassis_mod.parse_aero(sf_cdf)
+        except Exception:                      # a malformed file must not stop the car
+            model = {}
+        if model:
+            out["x_pcars2"] = {
+                "aero_model": model,
+                "_note": ("Fields of the chassis file by their documented names. Force vectors are "
+                          "(lateral, vertical, longitudinal) coefficients of speed squared in the "
+                          "game's units; centres are offsets from the rear axle at the reference "
+                          "plane. BodyFore and RWFore store 0 because forward drag is computed at "
+                          "run time from BodyDragBase and the ride heights."),
+            }
     return out
 
 
