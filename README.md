@@ -91,7 +91,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Differential type and lock | chassis file (`.cdfbin`): Torsen bias ratios, clutch preload, ramp angles and plate count; the GT86's rear differential (type, 1.5:1 and 4.0:1, 45 and 45 degrees, 2 plates, 40 Nm preload) matches the setup screen. Cars with several types on follow an assumed priority (flagged) |
 | Anti-roll bar rate | chassis file (`.cdfbin`), checked on the GT86 (55 and 20 N/mm). `bar_rate` is the roll stiffness that wheel rate gives across the track, arm geometry being unknown |
 | Inertia, CG fore/aft, steering ratio and lock, brake torque and bias | chassis file (`.cdfbin`). The inertia axis order is inferred; the CG agrees with the spec-sheet weight split in 148 of 208 cars (within 1 %) |
-| CG height | chassis file (`.cdfbin`) `CGHeight` plus the mean ride height, in 209 cars. The file names no reference plane; this reading (underside of the body at ride height) is an estimate, unconfirmed |
+| CG height | chassis file (`.cdfbin`) `CGHeight` plus the mean ride height, in 209 cars. The file names no reference plane; the underside of the body at ride height fits best: against Assetto Corsa's CG height for 52 cars matched by name and mass it is 2 cm low on average (5 cm scatter), while `CGHeight` alone is 12 cm low |
 | Wheel and upright mass and inertia | suspension file (`.sdfbin`), 126 cars; the others keep estimates |
 | Suspension hardpoints and links (125 cars on both axles, 21 on one) | suspension file (`.sdfbin`), placed on the `.vdfm` wheel centres |
 | Tyre Pacejka D, C, E | tyre file (`.hdtbin`) |
