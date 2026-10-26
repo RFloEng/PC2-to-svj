@@ -186,9 +186,10 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
     engine, chassis, gearbox and suspension files; PHYSICSPERSISTENT the descriptors,
     spec sheets and tyres). Project CARS keeps its chassis, engine, gearbox and
     suspension files in PHYSICSPERSISTENT, the spec sheets (.mrdf) in HRDFPERSISTENT and
-    the tyres (.hdtbin) in PHYSICSBOOTFLOW. Its .vdfm descriptors have another layout, so
-    its wheel centres come from the car's .vhf (see _parse_geometry_json). A root with
-    no PHYSICSMENU engines is read as Project CARS.
+    the tyres (.hdtbin) in PHYSICSBOOTFLOW and the descriptors (.vdfm) in HRDFPERSISTENT. Its
+    its descriptors (.vdfm, in HRDFPERSISTENT) have a shorter data section, so the wheel block is
+    found by pattern (_wheel_block_offset); a car's .vhf is the fallback (_parse_geometry_json). A root
+    with no PHYSICSMENU engines is read as Project CARS.
     """
     root = Path(extracted_root)
     menu = root / "PHYSICSMENU" / "vehicles" / "physics"
@@ -207,7 +208,7 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
         "gearbox":    d(base / "gearbox"),
         "suspension": d(base / "suspension"),
         "tyres":      d(boot / "tyres") if pc1 else d(pers / "tyres"),
-        "vehicles":   None if pc1 else d(pers / "vehicles"),   # .vdfm master descriptors
+        "vehicles":   d(hrdf / "vehicles") if pc1 else d(pers / "vehicles"),   # .vdfm master descriptors
         "statistics": d(hrdf / "statistics") if pc1 else d(pers / "statistics"),  # .mrdf spec sheets
         "driveline":  None if pc1 else d(pers / "driveline"),  # driveline.rg (text, per-car setups)
         # The files each car's own archive loads (extract_car_physics); preferred when present.
@@ -446,6 +447,30 @@ def _car_file(dirs: Dict[str, Optional[str]], subdir: str,
     return None
 
 
+def _wheel_block_offset(data: bytes) -> Optional[int]:
+    """
+    Offset of the four wheel-centre triples (FL, FR, RL, RR; game frame: X left, Y up,
+    Z rear) in a .vdfm. Project CARS 2 puts them at 136; Project CARS has a shorter data
+    section, so they sit elsewhere (92 on the Ariel Atom 3) with the same layout after
+    them. Found by pattern: left and right mirror each other in X (within 15 cm), the front pair is
+    ahead (Z < 0) and the rear pair behind (Z > 0), and the centres are 5-100 cm high.
+    """
+    def ok(o: int) -> bool:
+        try:
+            fl, fr, rl, rr = (struct.unpack_from("<3f", data, o + 12 * i) for i in range(4))
+        except struct.error:
+            return False
+        return (all(math.isfinite(v) for t in (fl, fr, rl, rr) for v in t)
+                and 0.3 < fl[0] < 1.5 and 0.3 < rl[0] < 1.5
+                and abs(fl[0] + fr[0]) < 0.15 and abs(rl[0] + rr[0]) < 0.15     # the Lotus 38 is 7 cm off-centre
+                and abs(fl[2] - fr[2]) < 0.02 and abs(rl[2] - rr[2]) < 0.02
+                and fl[2] < -0.3 and rl[2] > 0.3
+                and 0.05 < fl[1] < 1.0 and 0.05 < rl[1] < 1.0)
+    if ok(136):
+        return 136
+    return next((o for o in range(0, len(data) - 72, 4) if ok(o)), None)
+
+
 def _parse_vdfm(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     """
     Parse the vehicle's .vdfm file and return wheel-centre positions (SAE J670)
@@ -462,32 +487,31 @@ def _parse_vdfm(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     so front wheels sit at X=0, rear wheels at X=-wheelbase, and wheel
     centres have negative Z (above ground).
     """
-    if dirs.get("game") == "pc1":
-        return _parse_geometry_json(dirs, car)
     veh_dir = dirs.get("vehicles")
     if not veh_dir:
-        return None
+        return _parse_geometry_json(dirs, car) if dirs.get("game") == "pc1" else None
     # Resolve car name → vdfm stem (may differ from car name)
     stem = _VDFM_ALIASES.get(car, car)
     p = Path(veh_dir) / f"{stem}.vdfm"
     if not p.is_file():
         ranked = rank_candidates(stem, Path(veh_dir).glob("*.vdfm"), strict=True)
         if not ranked:
-            return None
+            return _parse_geometry_json(dirs, car) if dirs.get("game") == "pc1" else None
         p = ranked[0]
 
     try:
         data = p.read_bytes()
-        if len(data) < 216:
-            return None
-        fl_v = struct.unpack_from("<3f", data, 136)
-        fr_v = struct.unpack_from("<3f", data, 148)
-        rl_v = struct.unpack_from("<3f", data, 160)
-        rr_v = struct.unpack_from("<3f", data, 172)
-        twf  = struct.unpack_from("<f",  data, 184)[0]
-        odf  = struct.unpack_from("<f",  data, 188)[0]
-        twr  = struct.unpack_from("<f",  data, 200)[0]
-        odr  = struct.unpack_from("<f",  data, 204)[0]
+        w = _wheel_block_offset(data)
+        if w is None or len(data) < w + 72:
+            return _parse_geometry_json(dirs, car) if dirs.get("game") == "pc1" else None
+        fl_v = struct.unpack_from("<3f", data, w)
+        fr_v = struct.unpack_from("<3f", data, w + 12)
+        rl_v = struct.unpack_from("<3f", data, w + 24)
+        rr_v = struct.unpack_from("<3f", data, w + 36)
+        twf  = struct.unpack_from("<f",  data, w + 48)[0]
+        odf  = struct.unpack_from("<f",  data, w + 52)[0]
+        twr  = struct.unpack_from("<f",  data, w + 64)[0]
+        odr  = struct.unpack_from("<f",  data, w + 68)[0]
 
         front_axle_x = -(fl_v[2] + fr_v[2]) / 2
 
@@ -588,6 +612,9 @@ def _mrdf_from_chassis(chassis: Dict[str, Any], diffs: Dict[str, Any]) -> Dict[s
 
 
 _MRDF_DRIVE = {0: "RWD", 1: "AWD", 2: "FWD"}
+# Engine type of the spec sheet (offset 100), named as SVJ names a configuration
+_MRDF_ENGINE = {1: "V6", 2: "V8", 3: "V10", 4: "V12", 5: "I4", 6: "I5", 7: "I6", 8: "rotary2",
+                9: "rotary3", 10: "flat4", 11: "flat6", 12: "W16", 13: "W12", 14: "single", 15: "twin"}
 
 
 def _parse_mrdf(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
@@ -636,6 +663,25 @@ def _parse_mrdf(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     disp = f32(160)
     if 0.3 <= disp <= 12.0:
         out["displacement_l"] = round(disp, 3)
+    # Fields documented in the AMS2 docs' "statistics mrdf" translation (JDougNY, GvsE)
+    top, acc = f32(32), f32(36)
+    if 20.0 <= top <= 140.0:
+        out["top_speed_ms"] = round(top, 2)                 # metres per second
+    if 1.0 <= acc <= 30.0:
+        out["accel_0_100kph_s"] = round(acc, 2)
+    tq, hp = f32(68), f32(72)
+    if 20.0 <= tq <= 2500.0:
+        out["torque_Nm"] = round(tq * 1.355818, 1)          # the sheet gives lb-ft
+    if 10.0 <= hp <= 2500.0:
+        out["power_W"] = round(hp * 745.7, 0)               # SAE net horsepower
+    if 1 <= u32(64) <= 10:
+        out["gear_count"] = u32(64)
+    if u32(80) in (0, 1, 2):
+        out["boost_type"] = {0: "natural", 1: "supercharged", 2: "turbo"}[u32(80)]
+    if u32(100) in _MRDF_ENGINE:
+        out["engine_configuration"] = _MRDF_ENGINE[u32(100)]
+    if u32(164) in (0, 1):
+        out["shift_type"] = "manual" if u32(164) == 0 else "sequential"   # H pattern / sequential
     return out
 
 
@@ -1983,10 +2029,10 @@ def convert_car(car: str, extracted_root: str) -> Dict:
 
     # Parse vdfm for real wheel-centre positions and tire dimensions
     vdfm_data = _parse_vdfm(dirs, car)
-    if vdfm_data and dirs.get("game") == "pc1":
+    if vdfm_data and str(vdfm_data.get("_vdfm_file", "")).startswith("geometry.json"):
         print("  [OK] geometry: wheel centres and tyre size from the car's .vhf and tyre meshes")
     elif vdfm_data:
-        print("  [OK] vdfm: wheel centres read from pcars2_vdfm")
+        print("  [OK] vdfm: wheel centres read from the descriptor")
     else:
         print("  [WARN] vdfm: not found - hardpoints will be empty")
 
@@ -2021,6 +2067,13 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     engine = build_engine(sf_edf, car)
     if mrdf_data.get("displacement_l"):
         engine["displacement"] = mrdf_data["displacement_l"]
+    if mrdf_data.get("engine_configuration"):
+        engine["configuration"] = mrdf_data["engine_configuration"]
+    if mrdf_data.get("boost_type"):
+        engine["x_aspiration"] = mrdf_data["boost_type"]
+    if mrdf_data.get("engine_configuration") or mrdf_data.get("boost_type"):
+        engine["_spec_sheet_note"] = ("configuration and aspiration from the game's spec sheet "
+                                      "(engine type and boost type fields)")
 
     drive = mrdf_data.get("drive_type")
     # FWD -> FF and AWD -> AWD are certain. For RWD the mrdf doesn't say
@@ -2031,6 +2084,39 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     gearbox_raw  = build_gearbox(sf_gdf, car)
     final_drive  = gearbox_raw.pop("final_drive", 3.600)
     gearbox_svj  = {k: v for k, v in gearbox_raw.items()}   # type, ratios, _note
+
+    # The chassis file's gear settings pick the ratios out of the gearbox file's list; where
+    # that works it replaces the heuristic reading above.
+    driveline = chassis_data.get("driveline") or {}
+    trans = None
+    if sf_gdf is not None and driveline:
+        try:
+            trans = _chassis_mod.select_transmission(_chassis_mod.parse_gearbox_lists(sf_gdf._buf), driveline)
+        except Exception as exc:                 # a malformed file must not stop the car
+            print(f"  [WARN] transmission not decoded: {exc}")
+    if trans:
+        gearbox_svj["ratios"] = trans["ratios"]
+        gearbox_svj.pop("_est", None)
+        if trans.get("final_drive"):
+            final_drive = trans["final_drive"]
+        gearbox_svj["_note"] = (
+            "ratios: the gear settings of the chassis file picked from the gearbox file's list "
+            f"({len(trans['ratios'])} forward gears, {trans['index_order']} index); final drive from "
+            "the final-drive setting times the bevel"
+            + (" (the setting pointed past the last option: the last was used)"
+               if trans.get("final_drive_clamped") else "")
+            + ". Checked on the Toyota GT86 against the game's setup screen.")
+        if trans.get("final_drive_options"):
+            gearbox_svj["x_pcars2"] = {"final_drive_options": trans["final_drive_options"]}
+    else:
+        gearbox_svj["_est"] = True
+        print("  [WARN] gearbox: gear settings do not fit the gearbox file - ratios from the older heuristic")
+    if driveline.get("UpshiftDelay"):
+        gearbox_svj["shift_time"] = round(driveline["UpshiftDelay"], 3)
+        gearbox_svj.setdefault("x_pcars2", {}).update({
+            "upshift_delay_s": driveline.get("UpshiftDelay"), "upshift_clutch_time_s": driveline.get("UpshiftClutchTime"),
+            "downshift_delay_s": driveline.get("DownshiftDelay"), "downshift_clutch_time_s": driveline.get("DownshiftClutchTime"),
+            "shift_time_note": "shift_time is the game's UpshiftDelay"})
 
     # driveline.rg: gearbox type, clutch, crank inertia, which diffs exist
     dl_info = _parse_driveline(dirs, car)
@@ -2050,6 +2136,13 @@ def convert_car(car: str, extracted_root: str) -> Dict:
                                          "game units taken as kg*m^2)")
     else:
         print("  [WARN] driveline: no entry for this car - gearbox type and clutch use defaults")
+        if "SemiAutomatic" in driveline:
+            gearbox_svj["type"] = "sequential" if driveline["SemiAutomatic"] == 1 else "manual"
+            gearbox_svj["_note"] = gearbox_svj.get("_note", "") + " type from the chassis file (SemiAutomatic)."
+    if clutch_svj is None and driveline.get("ClutchTorque"):
+        clutch_svj = {"max_torque": round(driveline["ClutchTorque"], 1), "_source": "chassis file (ClutchTorque)"}
+        if driveline.get("ClutchInertia"):
+            clutch_svj["inertia_driven"] = round(driveline["ClutchInertia"], 5)
 
     if chassis_data.get("corners"):
         print("  [OK] chassis: springs, dampers, inertia, alignment from the cdfbin")
@@ -2168,6 +2261,14 @@ def convert_car(car: str, extracted_root: str) -> Dict:
             "meshes": [],   # no mesh data available from pCARS2 physics-only extraction
         },
     }
+    bench = []
+    for key, bid, unit in (("top_speed_ms", "top_speed", "m/s"), ("accel_0_100kph_s", "accel_0_100kph", "s"),
+                           ("power_W", "peak_power", "W"), ("torque_Nm", "peak_torque", "N*m")):
+        if mrdf_data.get(key) is not None:
+            bench.append({"id": bid, "value": mrdf_data[key], "unit": unit, "type": "simulated",
+                          "source": "the game's own spec sheet (statistics .mrdf)"})
+    if bench:
+        svj["benchmarks"] = bench
     if sf_cdf is not None:
         try:
             _apply_chassis_diffs(svj["powertrain"]["differentials"], chassis_diffs)

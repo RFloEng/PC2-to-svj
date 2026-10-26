@@ -102,7 +102,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | Data | Source |
 |---|---|
 | Torque curve, idle / max RPM | engine file (`.edfbin`) |
-| Gear ratios, final drive | gearbox file (`.gdfbin`) |
+| Gear ratios, final drive | gearbox file (`.gdfbin`): the gear settings of the chassis file pick the ratios out of the gearbox file's list, and the final-drive setting times the bevel gives the final drive (197 of 212 PC2 cars, 118 of 119 PC1 cars; the gear count equals the spec sheet in 195 and 114). The rest keep a flagged heuristic reading. Shift time is the game's upshift delay. Checked on the GT86 against the setup screen |
 | Mass, drivetrain (RWD/AWD/FWD), displacement, front/rear weight split | car-select spec sheet (`.mrdf`) |
 | Wheel centres, wheelbase, track, tyre width and radius | vehicle descriptor (`.vdfm`) |
 | Gearbox type, clutch type and torque capacity, crankshaft inertia, AWD diff layout (205 of 212 cars) | driveline setup (`driveline.rg`), matched by car name |
@@ -129,6 +129,8 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 
 ## Known limitations
 
+- Live-axle (beam axle) rear suspensions are not decoded: about 26 PC2 and 14 PC1 cars keep an estimated rear double wishbone, flagged `_est`. The turbo file is not read, PC1 chassis files carry no differential records, and neither game stores a drag coefficient.
+- Project CARS (PC1) data has not been compared with the game's setup screens. Geared top speed at the rev limiter is a median 0.90 (PC2) and 0.82 (PC1) of the spec-sheet top speed.
 - Tyre models have inverted normals in the game's own source data, so tyres may look flat-shaded.
 - Textures are capped at 512 px. Specular maps are approximated: gloss becomes roughness, and the specular colour uses the optional `KHR_materials_specular` extension as a reflectance mask.
 - Suspension geometry comes from the game's link records. The converter infers `system_type` and link names from the layout: double wishbone, MacPherson, multi-link, trailing arm or semi-trailing arm. Some strut cars are stored by the game as a long virtual upper arm, and those links carry a `_note`. Corners the game data leaves one link short get a flagged estimated toe or upper link so every corner has the 5 constraints it needs; trailing and semi-trailing arms end on `wheel_center`; a MacPherson strut runs from its top mount to an estimated lower point on the upright, and its spring and damper mounts follow it. Live axles, torsion beams, unusual layouts and the the cars whose suspension file lacks wheel-position records keep a representative double-wishbone estimate, flagged `_est`.
