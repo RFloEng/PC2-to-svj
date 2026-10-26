@@ -266,6 +266,17 @@ def apply_collision(svj: Dict, data: Dict[str, Any]) -> Dict[str, int]:
     poses = svj.setdefault("poses", [])
     chassis_proxies: List[Dict] = []
     moving: List[str] = []
+    used_ids = {p.get("id") for b in bodies if isinstance(b, dict) for p in b.get("collision", [])}
+    used_ids |= {p.get("id") for p in ch.get("collision", []) if p.get("x_source") != SRC}
+
+    def unique(base: str) -> str:
+        """A proxy id not used yet (two hulls can share a part name, such as 'l' and 'r')."""
+        n, cand = 2, base
+        while cand in used_ids:
+            cand, n = f"{base}_{n}", n + 1
+        used_ids.add(cand)
+        return cand
+
     counts = {"bodies": 0, "joints": 0, "proxies": 0}
 
     for sh in data["shapes"]:
@@ -276,9 +287,11 @@ def apply_collision(svj: Dict, data: Dict[str, Any]) -> Dict[str, int]:
                  "source_node": sh["name"], "x_source": SRC}
         part = part_name(sh["name"])
         joints = by_object.get(sh["name"], [])
+        if part in existing:                       # two hulls of one part name: keep one body
+            joints = []
         is_chassis = re.fullmatch(r"chas\w*\d*", part) is not None
         if is_chassis or not joints:
-            proxy["id"] = f"{part}_hull"
+            proxy["id"] = unique(f"{part}_hull")
             chassis_proxies.append(proxy)
             counts["proxies"] += 1
             continue
@@ -287,12 +300,13 @@ def apply_collision(svj: Dict, data: Dict[str, Any]) -> Dict[str, int]:
         hinge = _hinge(part, joints, centroid, front_z)
         mass = sh["mass"] if sh["mass"] and sh["mass"] > 0 else None
         if hinge is None or mass is None or part in existing:
-            proxy["id"] = f"{part}_hull"
+            proxy["id"] = unique(f"{part}_hull")
             chassis_proxies.append(proxy)
             counts["proxies"] += 1
             continue
 
-        proxy["id"] = f"{part}_hull"
+        proxy["id"] = unique(f"{part}_hull")
+        existing.add(part)
         bodies.append({
             "id": part, "name": part.replace("_", " ").title(), "category": "structural",
             "parent": "chassis", "mass": round(mass, 3), "position": _r(centre),

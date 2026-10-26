@@ -117,10 +117,21 @@ def _bff_candidates(car_name: str, vehicles_dir: Path) -> List[Path]:
 # Extraction helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+_GAME_TYPE: Optional[str] = None     # "PC1" for Project CARS (32-bit PCarsTools), None for Project CARS 2
+
+
+def set_game_type(game_type: Optional[str]) -> None:
+    """Select the game the archives belong to: "PC1" or None (Project CARS 2)."""
+    global _GAME_TYPE
+    _GAME_TYPE = game_type
+
+
 def _run_pcarstools(pcarstools: str, bff: str, game_dir: str, out_dir: str) -> bool:
     """Extract a .bff with PCarsTools (DOTNET_ROLL_FORWARD=Major)."""
     env = dict(os.environ, DOTNET_ROLL_FORWARD="Major")
     cmd = [pcarstools, "pak", "-i", bff, "-g", game_dir, "-o", out_dir]
+    if _GAME_TYPE:
+        cmd += ["--game-type", _GAME_TYPE]
     r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
     if r.returncode != 0:
         print(f"    [ERROR] PCarsTools pak: {r.stderr.strip()}")
@@ -131,7 +142,10 @@ def _run_pcarstools(pcarstools: str, bff: str, game_dir: str, out_dir: str) -> b
 
 
 def _decrypt_mebs(pcarstools: str, meb_dir: str) -> int:
-    """Run decryptmodel on all .meb files under meb_dir. Returns count of files processed."""
+    """Run decryptmodel on all .meb files under meb_dir. Returns count of files processed.
+    Project CARS models are not encrypted: nothing to do."""
+    if _GAME_TYPE == "PC1":
+        return 0
     env = dict(os.environ, DOTNET_ROLL_FORWARD="Major")
     meb_files = list(Path(meb_dir).rglob("*.meb"))
     count = 0
@@ -291,6 +305,44 @@ def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
         json.dump(svj, f, indent=2, ensure_ascii=False)
 
 
+def _car_geometry(work: Path) -> Optional[dict]:
+    """
+    Wheel centres and tyre size from a car's .vhf and tyre meshes (game frame:
+    X left, Y up, Z rear, origin on the ground). Project CARS has no .vdfm, so
+    these stand in for its wheel positions and tyre dimensions. The meshes must
+    be readable: Project CARS 2's are encrypted until decrypted, so this is for
+    Project CARS.
+    """
+    import numpy as np
+    vhfs = list(work.rglob("*.vhf"))
+    if not vhfs:
+        return None
+    transforms = _meb2glb_mod.parse_vhf_transforms(vhfs[0])
+    centres = {}
+    for corner, key in (("lf", "FL"), ("rf", "FR"), ("lr", "RL"), ("rr", "RR")):
+        stem = next((k for k in transforms if f"wheel_{corner}_loda" in k), None)
+        if stem is None:
+            return None
+        centres[key] = [round(float(v), 5) for v in transforms[stem][0]]
+    meb_dir = vhfs[0].parent
+
+    def tyre(corner: str) -> Optional[dict]:
+        f = next(iter(meb_dir.glob(f"*t[iy]re_{corner}_loda.meb")), None)
+        if f is None:
+            return None
+        pos = np.array(_meb2glb_mod.MebFile(str(f)).positions(), dtype=float)
+        if not len(pos):
+            return None
+        ext = pos.max(0) - pos.min(0)          # X: across the tyre, Y: its diameter
+        return {"width": round(float(ext[0]), 4), "diameter": round(float(ext[1]), 4)}
+
+    front, rear = tyre("lf"), tyre("lr")
+    if not (front and rear):
+        return None
+    return {"wheel_centres": centres, "tyre_front": front, "tyre_rear": rear,
+            "source": "car .vhf wheel nodes and tyre mesh extents"}
+
+
 def extract_car_physics(car_name: str, game_dir: str, pcarstools: str,
                         work_dir: str, out_root: str) -> bool:
     """
@@ -331,6 +383,16 @@ def extract_car_physics(car_name: str, game_dir: str, pcarstools: str,
         dest = Path(out_root) / car_name
         shutil.rmtree(dest, ignore_errors=True)
         shutil.copytree(phys, dest)
+        if _GAME_TYPE == "PC1":
+            try:
+                geometry = _car_geometry(work)
+            except Exception as exc:               # the car's physics are still usable
+                print(f"    [WARN] {car_name}: geometry not read: {exc}")
+                geometry = None
+            if geometry:
+                (dest / "geometry.json").write_text(json.dumps(geometry), encoding="utf-8")
+            else:
+                print(f"    [WARN] {car_name}: no wheel positions or tyre meshes in the archive")
         return True
     finally:
         shutil.rmtree(work, ignore_errors=True)

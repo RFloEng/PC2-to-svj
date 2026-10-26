@@ -108,6 +108,16 @@ def parse_chassis(sf) -> Dict[str, Any]:
     at = raw.find(tag) if tag else -1
     if at >= 0 and at + 9 <= len(raw):
         out["cg_height_m"] = struct.unpack_from("<f", raw, at + 5)[0]
+    # Mass (all mass except fuel, driver included) is a one-value token like CGHeight
+    mh = inv.get("Mass")
+    if mh:
+        for prefix, fmt in ((bytes([0x21]), "<i"), (bytes([0x22]), "<f")):
+            i = raw.find(prefix + bytes.fromhex(mh))
+            if i >= 0 and i + 9 <= len(raw):
+                v = struct.unpack_from(fmt, raw, i + 5)[0]
+                if v == v and 50 < v < 20000:
+                    out["mass_with_driver_kg"] = float(v)
+                    break
     corner: Optional[Dict[str, Any]] = None
     for r in sf.records:
         name = NAMES.get(r.hash_hex, "")

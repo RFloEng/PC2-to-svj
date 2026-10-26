@@ -1,15 +1,15 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** into SVJ (Standard Vehicle JSON) v0.102 files, with matching **GLB** 3D models.
+Converts the cars in **Project CARS 2** and **Project CARS** into SVJ (Standard Vehicle JSON) v0.102 files, with matching **GLB** 3D models.
 
-You point it at your own Project CARS 2 installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
+You point it at your own Project CARS 2 (or Project CARS) installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
 - one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.102 schema
 - one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse, normal and specular textures), linked from the SVJ file through SVJ visual bindings
 
-All 212 drivable cars convert.
+All 212 drivable Project CARS 2 cars convert. Project CARS is supported through a game profile (`--edition pc1`, see below).
 
-> **Not affiliated with or endorsed by the developers or publishers of Project CARS 2.**
+> **Not affiliated with or endorsed by the developers or publishers of Project CARS or Project CARS 2.**
 > This tool only reads files from a copy of the game you own. It doesn't bypass online protection and doesn't modify the game. The data it extracts belongs to the game's rights holders. Don't redistribute the extracted files or generated models.
 
 ## Requirements
@@ -39,6 +39,25 @@ python convert_all.py
 ```
 
 Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to `_pcars2/cars/<car>/`. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
+
+### Project CARS (the first game)
+
+```bash
+python convert_all.py --edition pc1
+```
+
+The edition is also inferred when `--game` points at a folder holding `pCARS.exe`. Output goes to `_pcars1/cars/<car>/`.
+
+What is different from Project CARS 2:
+
+- **Extraction.** Its archives use Xbox compression, so PCarsTools has to be the 32-bit build (`_pcars2/tools/win-x86/PCarsTools.exe`) with `--game-type PC1`, and Windows needs the [Microsoft XNA Framework 4.0 Redistributable](https://www.microsoft.com/en-us/download/details.aspx?id=20914) (the tool calls its native library). Its models are not encrypted.
+- **Where the files are.** The chassis, engine, gearbox and suspension files are in `PHYSICSPERSISTENT.bff` (and in each car's own archive, which again holds the files the car loads), the spec sheets (`.mrdf`) in `HRDFPERSISTENT.bff` and the tyres (`.hdtbin`) in `PHYSICSBOOTFLOW.bff`. `convert_all.py` unpacks all three. The spec sheet and tyre files are read with the Project CARS 2 readers: the spec sheet gives mass, drivetrain and rear weight share (the Ford Focus RS comes out FWD, the Audi A1 quattro and Lancer Evo IX AWD), and the tyres give Pacejka D, C and E.
+- **Wheel centres, wheelbase, track and tyre size** come from the car's `.vhf` and tyre meshes, because the `.vdfm` descriptors of Project CARS have another layout that is not decoded.
+- **Cars without a spec sheet or tyre file** (4 and 13 of the 119) use the chassis file's mass (all mass except fuel, driver included), the drivetrain from the differentials that are on, and the default tyre, all flagged as estimates.
+- **Not available:** engine displacement, gearbox type and clutch (no `driveline.rg`), and the engine position, which stays front-engine (`FR`) for RWD cars.
+- **Not cars:** `ford_duratec` and `jaguar_30_v6` have engine files but no car archive; they are skipped. 119 cars convert.
+
+Everything read from the chassis, engine, gearbox, suspension and collision files uses the same decoders as Project CARS 2.
 
 ### GUI
 
@@ -118,7 +137,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 
 | File | Purpose |
 |---|---|
-| `convert_all.py` | One-command pipeline: unpack, convert, models, validate |
+| `convert_all.py` | One-command pipeline for either game: unpack, convert, models, validate |
 | `pc2_to_svj_gui.py` | GUI |
 | `svj_migrate/` | The SVJ standard's suspension migration, vendored (refresh with `vendor_svj_migrate.py`) |
 | `pcars2_to_svj.py` | Physics → SVJ converter |

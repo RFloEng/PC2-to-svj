@@ -180,26 +180,42 @@ def _unify_suspension(svj: Dict) -> Dict:
 def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
     """
     Locate the per-type physics subdirectories under the extracted root.
-    Returns a dict of {type_name: absolute_path_or_None}.
+    Returns a dict of {type_name: absolute_path_or_None}, plus "game": "pc2" or "pc1".
+
+    Project CARS 2 splits the physics over two archives (PHYSICSMENU holds the
+    engine, chassis, gearbox and suspension files; PHYSICSPERSISTENT the descriptors,
+    spec sheets and tyres). Project CARS keeps its chassis, engine, gearbox and
+    suspension files in PHYSICSPERSISTENT, the spec sheets (.mrdf) in HRDFPERSISTENT and
+    the tyres (.hdtbin) in PHYSICSBOOTFLOW. Its .vdfm descriptors have another layout, so
+    its wheel centres come from the car's .vhf (see _parse_geometry_json). A root with
+    no PHYSICSMENU engines is read as Project CARS.
     """
     root = Path(extracted_root)
     menu = root / "PHYSICSMENU" / "vehicles" / "physics"
     pers = root / "PHYSICSPERSISTENT" / "vehicles" / "physics"
+    pc1 = not (menu / "engines").is_dir() and (pers / "engines").is_dir()
+    base = pers if pc1 else menu
+    hrdf = root / "HRDFPERSISTENT" / "vehicles" / "physics"      # Project CARS spec sheets
+    boot = root / "PHYSICSBOOTFLOW" / "vehicles" / "physics"     # Project CARS tyres
 
     def d(p): return str(p) if p.is_dir() else None
 
     return {
-        "engines":    d(menu / "engines"),
-        "chassis":    d(menu / "chassis"),
-        "gearbox":    d(menu / "gearbox"),
-        "suspension": d(menu / "suspension"),
-        "tyres":      d(pers / "tyres"),
-        "vehicles":   d(pers / "vehicles"),   # .vdfm master descriptors
-        "statistics": d(pers / "statistics"), # .mrdf car-select spec sheets
-        "driveline":  d(pers / "driveline"),  # driveline.rg (text, per-car setups)
+        "game":       "pc1" if pc1 else "pc2",
+        "engines":    d(base / "engines"),
+        "chassis":    d(base / "chassis"),
+        "gearbox":    d(base / "gearbox"),
+        "suspension": d(base / "suspension"),
+        "tyres":      d(boot / "tyres") if pc1 else d(pers / "tyres"),
+        "vehicles":   None if pc1 else d(pers / "vehicles"),   # .vdfm master descriptors
+        "statistics": d(hrdf / "statistics") if pc1 else d(pers / "statistics"),  # .mrdf spec sheets
+        "driveline":  None if pc1 else d(pers / "driveline"),  # driveline.rg (text, per-car setups)
         # The files each car's own archive loads (extract_car_physics); preferred when present.
         "car_physics": d(root.parent / "car_physics"),
     }
+
+
+GAME_LABEL = {"pc2": "Project CARS 2", "pc1": "Project CARS"}
 
 
 _DRIVELINE_CACHE: Dict[str, Dict] = {}
@@ -446,6 +462,8 @@ def _parse_vdfm(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     so front wheels sit at X=0, rear wheels at X=-wheelbase, and wheel
     centres have negative Z (above ground).
     """
+    if dirs.get("game") == "pc1":
+        return _parse_geometry_json(dirs, car)
     veh_dir = dirs.get("vehicles")
     if not veh_dir:
         return None
@@ -499,6 +517,74 @@ def _parse_vdfm(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     except Exception as exc:
         print(f"  [WARN] vdfm parse error for {car}: {exc}")
         return None
+
+
+def _parse_geometry_json(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
+    """
+    Wheel centres and tyre size of a Project CARS car, which has no .vdfm.
+
+    extract_car_physics writes <car_physics>/<car>/geometry.json from the car's
+    .vhf (wheel node positions, game frame: X left, Y up, Z rear, origin on the
+    ground) and its tyre meshes (width along X, diameter along Y). Same result
+    as _parse_vdfm.
+    """
+    own = dirs.get("car_physics")
+    p = Path(own) / car / "geometry.json" if own else None
+    if not p or not p.is_file():
+        return None
+    try:
+        g = json.loads(p.read_text(encoding="utf-8"))
+        wc = g["wheel_centres"]
+        fl_v, fr_v, rl_v, rr_v = (wc[k] for k in ("FL", "FR", "RL", "RR"))
+        front_axle_x = -(fl_v[2] + fr_v[2]) / 2
+
+        def _v2sae(v: List[float]) -> List[float]:
+            return [round(-v[2] - front_axle_x, 4), round(-v[0], 4), round(-v[1], 4)]
+
+        corners = {"FL": _v2sae(fl_v), "FR": _v2sae(fr_v), "RL": _v2sae(rl_v), "RR": _v2sae(rr_v)}
+        rear_axle_x = (corners["RL"][0] + corners["RR"][0]) / 2
+        tf, tr = g["tyre_front"], g["tyre_rear"]
+        return {
+            **corners,
+            "wheelbase":   round(-rear_axle_x, 4),
+            "track_front": round(abs(corners["FR"][1] - corners["FL"][1]), 4),
+            "track_rear":  round(abs(corners["RR"][1] - corners["RL"][1]), 4),
+            "_vdfm_file":  "geometry.json (car .vhf and tyre meshes)",
+            "_front_axle_x": front_axle_x,
+            "tire_front": {"section_width_m": round(tf["width"], 4), "free_radius_m": round(tf["diameter"] / 2, 4)},
+            "tire_rear":  {"section_width_m": round(tr["width"], 4), "free_radius_m": round(tr["diameter"] / 2, 4)},
+        }
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"  [WARN] geometry.json not usable for {car}: {exc}")
+        return None
+
+
+def _mrdf_from_chassis(chassis: Dict[str, Any], diffs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Stand-in for the spec sheet of a car that has none (a few Project CARS cars).
+
+    mass: the chassis file's Mass, which is all mass except fuel with the driver.
+    drivetrain: the differentials that are on (front only FWD, rear only RWD,
+    front and rear or a centre one AWD; 203 of 212 right on Project CARS 2 cars,
+    whose spec sheets give the true value).
+    rear weight fraction: the chassis file's CGRearRange (agrees with the spec sheet
+    to 1 % on 148 of 208 Project CARS 2 cars).
+    """
+    out: Dict[str, Any] = {"_mrdf_file": "cdfbin (no spec sheet)", "_from_chassis": True}
+    if chassis.get("mass_with_driver_kg"):
+        out["mass_kg"] = chassis["mass_with_driver_kg"]
+    if chassis.get("cg_rear_fraction") is not None:
+        out["rear_weight_fraction"] = chassis["cg_rear_fraction"]
+    front = bool((diffs.get("front") or {}).get("active"))
+    rear = bool((diffs.get("rear") or {}).get("active"))
+    centre = bool((diffs.get("center") or {}).get("active"))
+    if (front and rear) or centre:
+        out["drive_type"] = "AWD"
+    elif front:
+        out["drive_type"] = "FWD"
+    elif rear:
+        out["drive_type"] = "RWD"
+    return out
 
 
 _MRDF_DRIVE = {0: "RWD", 1: "AWD", 2: "FWD"}
@@ -981,7 +1067,8 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
     wheelbase / track: from the vdfm wheel centres.
     """
     mass = (mrdf or {}).get("mass_kg")
-    mass_source = "pcars2_mrdf" if mass else "default"
+    mass_source = ((mrdf or {}).get("_from_chassis") and "cdfbin Mass (all mass except fuel, driver included)"
+                   or "pcars2_mrdf") if mass else "default"
     if not mass:
         mass = _DEFAULT_MASS
         print(f"  [WARN] {car}: no mrdf mass; using default {_DEFAULT_MASS:.0f} kg")
@@ -1768,29 +1855,42 @@ def build_steering(car: str, cdf: Optional[Dict] = None) -> Dict:
 def _metadata(car: str, extracted_root: str, **files) -> Dict:
     """Build the SVJ _metadata section."""
     src = {k: (Path(v).name if v else None) for k, v in files.items()}
+    game = _physics_dirs(extracted_root).get("game", "pc2")
+    label = GAME_LABEL[game]
+    if game == "pc1":
+        detail = (
+            "Extracted from Project CARS ShCB physics files via PCarsTools 1.1.4 (--game-type PC1). "
+            "Springs, dampers, alignment, inertia, CG, steering, brakes, differentials and aero: chassis file. "
+            "Engine torque curve, gear ratios and suspension links and masses: engine, gearbox and "
+            "suspension files. Wheel centres, track, wheelbase and tyre size: the car's .vhf and tyre meshes. "
+            "Mass, drivetrain, weight split: spec sheet (.mrdf) in HRDFPERSISTENT, or the chassis file "
+            "when a car has none. Tire Pacejka D/C/E: hdtbin in PHYSICSBOOTFLOW; B estimated."
+        )
+    else:
+        detail = (
+            "Extracted from Project CARS 2 ShCB physics files via PCarsTools 1.1.4. "
+            "Engine torque curve: edfbin hash 8b0ab771. "
+            "Gear ratios: raw byte-scan of gdfbin (validated GT86/FR3.5/NSX). "
+            "Springs, dampers, alignment, inertia, CG, steering, brakes, differentials: chassis file. "
+            "Wheel centres, wheelbase, track, tire size: vdfm. "
+            "Tire Pacejka D/C/E: hdtbin b31155cd/b1033b86/c0eaf58d; B estimated."
+        )
     return {
         "specification":         "SVJ",
         "version":               SVJ_VERSION,
-        "description":           f"Project CARS 2 — {car} (pCARS2→SVJ auto-converted)",
+        "description":           f"{label} — {car} ({label} auto-converted)",
         "coordinate_system":     "SAE_J670",
         "units":                 "SI",
-        "source_format":         "Project CARS 2",
+        "source_format":         label,
         "data_origin": {
             "type":       "simulation",
-            "detail": (
-                "Extracted from Project CARS 2 ShCB physics files via PCarsTools 1.1.4. "
-                "Engine torque curve: edfbin hash 8b0ab771. "
-                "Gear ratios: raw byte-scan of gdfbin (validated GT86/FR3.5/NSX). "
-                "Springs: sdfbin hash 670b57ab block structure. "
-                "Wheel centres, wheelbase, track, tire size: vdfm. "
-                "Tire Pacejka D/C/E: hdtbin b31155cd/b1033b86/c0eaf58d; B estimated."
-            ),
+            "detail":     detail,
             "confidence": "low",
         },
         "alignment_convention":  "relative_to_centerline",
-        "_converter":            "pCARS2->SVJ Converter v0.3",
+        "_converter":            "pCARS->SVJ Converter v0.4",
         "x_converter_repo":      "https://github.com/RFloEng/PC2-to-svj",
-        "_source_game":          "Project CARS 2",
+        "_source_game":          label,
         "_car_name":             car,
         "_source_files":         src,
         "_scipy_available":      HAS_SCIPY,
@@ -1883,14 +1983,33 @@ def convert_car(car: str, extracted_root: str) -> Dict:
 
     # Parse vdfm for real wheel-centre positions and tire dimensions
     vdfm_data = _parse_vdfm(dirs, car)
-    if vdfm_data:
+    if vdfm_data and dirs.get("game") == "pc1":
+        print("  [OK] geometry: wheel centres and tyre size from the car's .vhf and tyre meshes")
+    elif vdfm_data:
         print("  [OK] vdfm: wheel centres read from pcars2_vdfm")
     else:
         print("  [WARN] vdfm: not found - hardpoints will be empty")
 
+    # The chassis file first: Project CARS has no spec sheet, so it stands in for it
+    chassis_data: Dict[str, Any] = {}
+    chassis_diffs: Dict[str, Any] = {}
+    if sf_cdf is not None:
+        try:
+            chassis_data = _chassis_mod.parse_chassis(sf_cdf)
+            chassis_diffs = _chassis_mod.parse_diffs(sf_cdf)
+        except Exception as exc:                 # a malformed file must not stop the car
+            print(f"  [WARN] chassis file not decoded: {exc}")
+
     # Game spec sheet: mass, drivetrain, weight distribution, displacement
     mrdf_data = _parse_mrdf(dirs, car) or {}
-    if mrdf_data:
+    if not mrdf_data and dirs.get("game") == "pc1":
+        mrdf_data = _mrdf_from_chassis(chassis_data, chassis_diffs)
+        print("  [INFO] no spec sheet for this car: mass, drivetrain and weight split from the chassis file")
+    if mrdf_data.get("_from_chassis"):
+        print(f"  [OK] chassis file: {mrdf_data.get('mass_kg')} kg with driver, "
+              f"{mrdf_data.get('drive_type')} (from the differentials), rear weight "
+              f"{mrdf_data.get('rear_weight_fraction')}")
+    elif mrdf_data:
         print(f"  [OK] mrdf: {mrdf_data.get('mass_kg')} kg, "
               f"{mrdf_data.get('drive_type')}, {mrdf_data.get('displacement_l')} L")
     else:
@@ -1932,12 +2051,6 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     else:
         print("  [WARN] driveline: no entry for this car - gearbox type and clutch use defaults")
 
-    chassis_data: Dict[str, Any] = {}
-    if sf_cdf is not None:
-        try:
-            chassis_data = _chassis_mod.parse_chassis(sf_cdf)
-        except Exception as exc:                 # a malformed file must not stop the car
-            print(f"  [WARN] chassis file not decoded: {exc}")
     if chassis_data.get("corners"):
         print("  [OK] chassis: springs, dampers, inertia, alignment from the cdfbin")
     suspension = build_suspension(sf_sdf, sf_hdt, car, vdfm=vdfm_data,
@@ -2057,7 +2170,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     }
     if sf_cdf is not None:
         try:
-            _apply_chassis_diffs(svj["powertrain"]["differentials"], _chassis_mod.parse_diffs(sf_cdf))
+            _apply_chassis_diffs(svj["powertrain"]["differentials"], chassis_diffs)
         except Exception as exc:               # a malformed file must not stop the car
             print(f"  [WARN] differentials not read from the chassis file: {exc}")
     return _unify_suspension(svj)
@@ -2334,7 +2447,7 @@ See PCARS2_EXTRACTION_NOTES.md for the full extraction recipe.
         return
 
     print("=" * 62)
-    print("  Project CARS 2 -> SVJ Converter  v0.2")
+    print("  Project CARS / Project CARS 2 -> SVJ Converter  v0.4")
     print("=" * 62)
     print(f"  Source  : {args.dir}")
     print(f"  Scipy   : {'available' if HAS_SCIPY else 'NOT found (simplified Pacejka)'}")
