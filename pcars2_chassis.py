@@ -381,15 +381,26 @@ def select_transmission(lists: Optional[Dict[str, Any]], dl: Dict[str, float]) -
     if not lists or not dl.get("ForwardGears"):
         return None
     n = int(dl["ForwardGears"])
-    if not 1 <= n <= len(_GEAR_SETTINGS) or any(name not in dl for name in _GEAR_SETTINGS[:n]):
+    if not 1 <= n <= len(_GEAR_SETTINGS):
         return None
     gears = lists["gears"]
-    idx = [int(dl[name]) for name in _GEAR_SETTINGS[:n]]
+    if any(name not in dl for name in _GEAR_SETTINGS[:n]):
+        # The dictionary names gears one to seven: a car with more gears has no stored
+        # setting for the rest. When the file offers exactly one ratio per gear and the
+        # settings that are stored count up from zero, the list is the gearbox.
+        known = [int(dl[name]) for name in _GEAR_SETTINGS[:n] if name in dl]
+        if len(gears) != n or known != list(range(len(known))):
+            return None
+        idx = list(range(n))
+    else:
+        idx = [int(dl[name]) for name in _GEAR_SETTINGS[:n]]
     if any(not 0 <= k < len(gears) for k in idx):
         return None
     ratios = None
     order = "forward"
-    for label, pick in (("forward", lambda k: gears[k]), ("reversed", lambda k: gears[len(gears) - 1 - k])):
+    by_size = sorted(gears, reverse=True)
+    for label, pick in (("forward", lambda k: gears[k]), ("reversed", lambda k: gears[len(gears) - 1 - k]),
+                        ("sorted", lambda k: by_size[k])):
         r = [pick(k) for k in idx]
         if all(a > b for a, b in zip(r, r[1:])) or (n == 1):
             ratios, order = r, label
@@ -400,6 +411,8 @@ def select_transmission(lists: Optional[Dict[str, Any]], dl: Dict[str, float]) -
     finals = lists["finals"]
     if finals:
         fi = int(dl.get("FinalDriveSetting", 0))
+        if order == "sorted":
+            finals = sorted(finals, reverse=True)
         if order == "reversed":
             fi = len(finals) - 1 - fi if 0 <= fi < len(finals) else fi
         if fi >= len(finals):          # some files store the count of options: the last one
