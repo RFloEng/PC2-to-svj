@@ -343,6 +343,10 @@ def _car_geometry(work: Path) -> Optional[dict]:
             "source": "car .vhf wheel nodes and tyre mesh extents"}
 
 
+# Automobilista 2 names a car's physics files differently from its archive: the archive is trusted.
+TRUST_ARCHIVE = False
+
+
 def extract_car_physics(car_name: str, game_dir: str, pcarstools: str,
                         work_dir: str, out_root: str) -> bool:
     """
@@ -376,7 +380,7 @@ def extract_car_physics(car_name: str, game_dir: str, pcarstools: str,
         chassis = [f.stem.lower() for f in (phys / "chassis").glob("*.cdfbin")]
         want = {car_name.lower(), cands[0].stem.lower()}
         import difflib
-        if chassis and not (set(chassis) & want) and not any(
+        if not TRUST_ARCHIVE and chassis and not (set(chassis) & want) and not any(
                 difflib.SequenceMatcher(None, c, w).ratio() >= 0.8 for c in chassis for w in want):
             print(f"    [WARN] {cands[0].name}: chassis {chassis} does not match {car_name}; not used")
             return False

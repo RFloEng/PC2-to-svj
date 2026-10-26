@@ -172,9 +172,11 @@ class ShCBRecord:
         Returns (rpm, val1_f32, val2_f32) or None.
         Layout: [0]=subtype_byte, [1..4]=RPM_u32, [5..8]=f32_val1, [9..12]=f32_val2
         """
-        if self.type_code != 0x93 or len(self.body) < 13:
+        if self.type_code not in (0x93, 0xA3) or len(self.body) < 13:
             return None
-        rpm  = struct.unpack_from("<I", self.body, 1)[0]
+        # Project CARS 2 stores the rpm as an integer (0x93); Automobilista 2 as a float (0xA3)
+        rpm  = (struct.unpack_from("<I", self.body, 1)[0] if self.type_code == 0x93
+                else int(round(struct.unpack_from("<f", self.body, 1)[0])))
         val1 = struct.unpack_from("<f", self.body, 5)[0]
         val2 = struct.unpack_from("<f", self.body, 9)[0]
         return (rpm, val1, val2)
@@ -279,7 +281,7 @@ class ShCBFile:
         """
         pts = [r.decode_curve_point()
                for r in self.get_all("8b0ab771")
-               if r.type_code == 0x93]
+               if r.type_code in (0x93, 0xA3)]
         return sorted((p for p in pts if p is not None), key=lambda x: x[0])
 
     def get_engine_scalars(self) -> Dict[str, Any]:

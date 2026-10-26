@@ -201,8 +201,9 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
 
     def d(p): return str(p) if p.is_dir() else None
 
+    ams2 = root.parent.name.lower() == "_ams2"      # Automobilista 2: the same files as Project CARS 2
     return {
-        "game":       "pc1" if pc1 else "pc2",
+        "game":       "pc1" if pc1 else ("ams2" if ams2 else "pc2"),
         "engines":    d(base / "engines"),
         "chassis":    d(base / "chassis"),
         "gearbox":    d(base / "gearbox"),
@@ -216,7 +217,7 @@ def _physics_dirs(extracted_root: str) -> Dict[str, Optional[str]]:
     }
 
 
-GAME_LABEL = {"pc2": "Project CARS 2", "pc1": "Project CARS"}
+GAME_LABEL = {"pc2": "Project CARS 2", "pc1": "Project CARS", "ams2": "Automobilista 2"}
 
 
 _DRIVELINE_CACHE: Dict[str, Dict] = {}
@@ -684,7 +685,7 @@ def _parse_mrdf(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
             return None
         p = ranked[0]
     data = p.read_bytes()
-    if len(data) != 256:
+    if len(data) not in (224, 256):          # Automobilista 2 sheets are 224 bytes, same field offsets
         return None
 
     f32 = lambda o: struct.unpack_from("<f", data, o)[0]
@@ -709,7 +710,9 @@ def _parse_mrdf(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
         out["accel_0_100kph_s"] = round(acc, 2)
     tq, hp = f32(68), f32(72)
     if 20.0 <= tq <= 2500.0:
-        out["torque_Nm"] = round(tq * 1.355818, 1)          # the sheet gives lb-ft
+        # the sheet gives lb-ft (Project CARS 2) or N.m (Automobilista 2: peak torque of the
+        # engine curve is 1.00 of it on 260 naturally aspirated cars)
+        out["torque_Nm"] = round(tq * (1.0 if len(data) == 224 else 1.355818), 1)
     if 10.0 <= hp <= 2500.0:
         out["power_W"] = round(hp * 745.7, 0)               # SAE net horsepower
     if 1 <= u32(64) <= 10:
@@ -1204,6 +1207,10 @@ def build_chassis(car: str, vdfm: Optional[Dict] = None,
         chassis["wheelbase"]   = vdfm["wheelbase"]
         chassis["track_front"] = vdfm["track_front"]
         chassis["track_rear"]  = vdfm["track_rear"]
+    elif "wheelbase" not in chassis:
+        chassis["wheelbase"] = _DEFAULT_WHEELBASE       # a generic archive with no descriptor of its own
+        chassis["track_front"] = chassis["track_rear"] = _DEFAULT_TRACK
+        chassis["_wheelbase_est"] = True
     return chassis
 
 
@@ -1811,7 +1818,7 @@ def build_suspension(sf_sdf: Optional[ShCBFile],
                                       "setting x step), degrees converted to radians.")
         arb = {}
         arb_rate = (chassis or {}).get("arb_front_Nm" if axle == "front" else "arb_rear_Nm")
-        if arb_rate:
+        if arb_rate and 0.5 * arb_rate * ((vdfm or {}).get("track_front" if axle == "front" else "track_rear") or _DEFAULT_TRACK) ** 2 >= 0.05:
             track = (vdfm or {}).get("track_front" if axle == "front" else "track_rear") or _DEFAULT_TRACK
             arb = {"bar_id": f"arb_{axle}",
                    # roll stiffness a wheel rate k adds across a track t is k t^2 / 2
@@ -1983,7 +1990,7 @@ def _metadata(car: str, extracted_root: str, **files) -> Dict:
         )
     else:
         detail = (
-            "Extracted from Project CARS 2 ShCB physics files via PCarsTools 1.1.4. "
+            f"Extracted from {label} ShCB physics files via PCarsTools 1.1.4. "
             "Engine torque curve: edfbin hash 8b0ab771. "
             "Gear ratios: raw byte-scan of gdfbin (validated GT86/FR3.5/NSX). "
             "Springs, dampers, alignment, inertia, CG, steering, brakes, differentials: chassis file. "

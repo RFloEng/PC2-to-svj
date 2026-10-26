@@ -59,6 +59,11 @@ PROFILES = {
         "exe": "pCARS2.exe", "env": "PCARS2_DIR", "tools": "win-x64", "game_type": None,
         "archives": [("PHYSICSMENU.bff", "PHYSICSMENU"), ("PHYSICSPERSISTENT.bff", "PHYSICSPERSISTENT")],
     },
+    "ams2": {
+        "label": "Automobilista 2", "work": "_ams2", "steam": ["Automobilista 2"],
+        "exe": "AMS2.exe", "env": "AMS2_DIR", "tools": "win-x64", "game_type": None,
+        "archives": [("PHYSICSMENU.bff", "PHYSICSMENU"), ("PHYSICSPERSISTENT.bff", "PHYSICSPERSISTENT")],
+    },
     "pc1": {
         "label": "Project CARS", "work": "_pcars1", "steam": ["pCars", "Project CARS"],
         "exe": "pCARS.exe", "env": "PCARS1_DIR", "tools": "win-x86", "game_type": "PC1",
@@ -93,6 +98,8 @@ def steam_paths() -> List[str]:
 
 def edition_of(folder: Path) -> Optional[str]:
     """pc2 if the folder holds pCARS2.exe, pc1 if it holds pCARS.exe or pCARS64.exe."""
+    if (folder / "AMS2.exe").is_file():
+        return "ams2"
     if (folder / "pCARS2.exe").is_file():
         return "pc2"
     if (folder / "pCARS.exe").is_file() or (folder / "pCARS64.exe").is_file():
@@ -251,7 +258,17 @@ def main() -> None:
     pc2 = load("pcars2_to_svj")
     ensure_physics(game, args.reextract, pc2)
 
-    cars = select(pc2.list_cars(str(EXTRACTED)), args.car)
+    if _EDITION == "ams2":
+        # Automobilista 2 keeps most physics only in each car's own archive, under file names
+        # that differ from the archive's (Porsche_963_GTP.bff holds porsche_963.*): the cars are
+        # the archives themselves, without the cockpit, livery and low-detail (LD) extras.
+        import re
+        extras = re.compile(r"(_cockpit|_livery|_ld)(_|$)")
+        listed = sorted(f.stem.lower() for f in (game / "Pakfiles" / "Vehicles").glob("*.bff")
+                        if not extras.search(f.stem.lower()))
+    else:
+        listed = pc2.list_cars(str(EXTRACTED))
+    cars = select(listed, args.car)
     if not cars:
         die("No cars to convert.")
     out = Path(args.out)
@@ -266,6 +283,7 @@ def main() -> None:
         ensure_tools(game)
         meshes = load("pcars2_extract_meshes")
         meshes.set_game_type(PROFILE["game_type"])
+        meshes.TRUST_ARCHIVE = _EDITION == "ams2"
         failed_own = []
         for car in todo:
             try:
@@ -275,7 +293,7 @@ def main() -> None:
                 good = False
             if not good:
                 failed_own.append(car)
-        if failed_own and PROFILE["game_type"] == "PC1":
+        if failed_own and (PROFILE["game_type"] == "PC1" or _EDITION == "ams2"):
             # Project CARS keeps a few engine definitions that no car archive uses: no wheels, no car
             print(f"  [WARN] not cars (no archive of their own, skipped): {', '.join(failed_own)}")
             cars = [c for c in cars if c not in failed_own]

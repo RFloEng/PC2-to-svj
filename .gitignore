@@ -10,3 +10,4 @@ svj_spec/
 # Python
 __pycache__/
 *.pyc
+_ams2/

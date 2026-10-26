@@ -40,6 +40,20 @@ python convert_all.py
 
 Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to `_pcars2/cars/<car>/`. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
 
+### Automobilista 2
+
+Automobilista 2 uses the same file formats as Project CARS 2, so the same pipeline converts it:
+
+```
+python convert_all.py --edition ams2        # or --game "D:/Steam/steamapps/common/Automobilista 2"
+```
+
+Output goes to `_ams2/cars/` (not tracked by git). What differs from Project CARS 2:
+
+- **The cars are the archives.** Most of the physics of an AMS2 car lives only in its own archive (`Pakfiles/Vehicles/<Car>.bff`), under file names that differ from the archive's (`Porsche_963_GTP.bff` holds `porsche_963.*`). The cockpit, livery and low-detail (`_LD`) archives are skipped; 424 cars are converted.
+- Engine curve points store the rpm as a float, and spec sheets (`.mrdf`) are 224 bytes with the same field offsets. The sheet's peak torque is in N.m, not lb-ft: against it the engine curve peaks at 1.00 on naturally aspirated cars. Turbo cars read about 0.7: the curve does not include the boost, which is not applied.
+- Tyre files are not matched to the cars (the car-to-tyre link is not in any file read so far), so most AMS2 cars use default tyres, flagged. Cars whose archive has no descriptor of its own (`formula_retro`, `rally_kart`) get an estimated wheelbase and track.
+
 ### Project CARS (the first game)
 
 ```bash
