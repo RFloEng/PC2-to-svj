@@ -403,6 +403,44 @@ def mesh_id(car: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", car.lower())
 
 
+_TURBO_FIELDS = (("size", "{n}Size"), ("optimum_rpm", "{n}Turbine Optimum RPM"),
+                 ("engine_rpm", "{n}Engine RPM"), ("inertia", "{n}Inertia"),
+                 ("friction", "{n}Friction"), ("fuel_pct", "{n}Fuel Percentage"))
+# hashes from the community TBF documentation (AMS2 modding docs, Shiimis); the
+# value prefix is the type: 0x20 byte, 0x21 int, 0x22 float, 0x28 zero
+_TURBO_HASH = {
+    1: ("76417e95", "709ee8ae", "8f5e8f2d", "315c414c", "473c8f3a", "76834af6"),
+    2: ("48f93fc8", "effd21ed", "ce0d0339", "1ed99a2f", "51418d75", "aa7d600a"),
+}
+
+
+def parse_turbo(path: Optional[str]) -> List[Dict[str, Any]]:
+    """The turbochargers (or supercharger) of a car's .tbfbin: size, turbine optimum rpm,
+    engine rpm, inertia, friction and fuel percentage per unit. Units are the game's."""
+    if not path:
+        return []
+    b = ShCBFile(path)._buf
+    units: List[Dict[str, Any]] = []
+    for n, hashes in _TURBO_HASH.items():
+        unit: Dict[str, Any] = {}
+        for (key, _), h in zip(_TURBO_FIELDS, hashes):
+            i = b.find(bytes.fromhex(h))
+            if i < 1:
+                continue
+            t, o = b[i - 1], i + 4
+            if t == 0x20 and o < len(b):
+                unit[key] = float(b[o])
+            elif t == 0x21 and o + 4 <= len(b):
+                unit[key] = float(struct.unpack_from("<i", b, o)[0])
+            elif t == 0x22 and o + 4 <= len(b):
+                unit[key] = round(struct.unpack_from("<f", b, o)[0], 4)
+            elif t == 0x28:
+                unit[key] = 0.0
+        if len(unit) >= 4:
+            units.append({"unit": n, **unit})
+    return units
+
+
 def list_cars(extracted_root: str) -> List[str]:
     """Return sorted list of car names for which an edfbin exists."""
     dirs = _physics_dirs(extracted_root)
@@ -1419,7 +1457,9 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
             tops[st] = to_sae(p, st)
 
     out: Dict[str, Tuple[str, Dict[str, List[float]], List[Dict], Dict]] = {}
+    leftover: Dict[str, List[Tuple[List[float], List[float]]]] = {}    # corners no independent layout fits
     for st, pairs in corners.items():
+        leftover[st] = pairs
         wc = vdfm[st]
         if any(math.hypot(o[0] - wc[0], o[1] - wc[1]) > _MAX_JOINT_REACH for _, o in pairs):
             continue
@@ -1584,6 +1624,35 @@ def _real_topologies(sdf_links: Dict[str, Any], vdfm: Optional[Dict]
                                        "estimated behind the wheel centre so the wheel is located."})
         extra = {"_dropped_links": dropped} if dropped else {}
         out[st] = (system, hp, links, extra)
+        leftover.pop(st, None)
+
+    # Live axles and beam axles: both corners of an axle carry link records, but no
+    # independent layout fits. SVJ models them as one axle body that the links locate.
+    for axle in ("F", "R"):
+        sts = [axle + "L", axle + "R"]
+        if any(x in out for x in sts) or not all(x in leftover for x in sts):
+            continue
+        axle_id = "front_axle" if axle == "F" else "rear_axle"
+        centre = [round((vdfm[sts[0]][i] + vdfm[sts[1]][i]) / 2, 4) for i in range(3)]
+        for st in sts:
+            wc = vdfm[st]
+            groups: Dict[Tuple[float, ...], List[List[float]]] = {}
+            for inb, outb in leftover[st]:
+                groups.setdefault(tuple(round(v, 3) for v in outb), []).append(inb)
+            hp = {"wheel_center": [round(v, 4) for v in wc]}
+            links: List[Dict] = []
+            for n, (outb, inbs) in enumerate(sorted(groups.items(), key=lambda g: g[0][0]), 1):
+                name = f"axle_link_{n}"
+                hp[name + "_outer"] = list(outb)
+                links.append({"name": name, "type": "arm" if len(inbs) >= 2 else "rod",
+                              "inboard_points": inbs, "outboard_ref": f"hardpoints.{name}_outer",
+                              "joint_type": "spherical",
+                              "inboard_joint_type": "revolute" if len(inbs) >= 2 else "spherical"})
+            out[st] = ("solid_axle", hp, links, {
+                "lateral_location": "link_located",
+                "axle_body": {"id": axle_id, "mass": 60.0, "position": centre, "_est": True,
+                              "_note": "Axle body mass is an estimate; the links are the sdfbin "
+                                       "records of this axle, on the vdfm wheel centres."}})
 
     # Keep an axle only when both of its corners decoded (avoids half-real axles)
     for axle in ("F", "R"):
@@ -2071,6 +2140,17 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         engine["configuration"] = mrdf_data["engine_configuration"]
     if mrdf_data.get("boost_type"):
         engine["x_aspiration"] = mrdf_data["boost_type"]
+    try:
+        turbo_units = parse_turbo(_car_file(dirs, "turbo", car, "tbfbin"))
+    except Exception as exc:                     # a malformed file must not stop the car
+        turbo_units = []
+        print(f"  [WARN] turbo not decoded: {exc}")
+    if turbo_units:
+        engine["x_turbo"] = {
+            "units": turbo_units,
+            "_note": ("from the turbo file (.tbfbin): per unit the size, turbine optimum rpm, "
+                      "engine rpm, inertia, friction and fuel percentage, in the game's own units "
+                      "(field names from the community TBF documentation, units not documented)")}
     if mrdf_data.get("engine_configuration") or mrdf_data.get("boost_type"):
         engine["_spec_sheet_note"] = ("configuration and aspiration from the game's spec sheet "
                                       "(engine type and boost type fields)")
