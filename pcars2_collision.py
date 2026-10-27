@@ -298,7 +298,7 @@ def apply_collision(svj: Dict, data: Dict[str, Any]) -> Dict[str, int]:
 
         centroid = [sum(v[i] for v in verts) / len(verts) for i in range(3)]
         hinge = _hinge(part, joints, centroid, front_z)
-        mass = sh["mass"] if sh["mass"] and sh["mass"] > 0 else None
+        mass = sh["mass"] if sh["mass"] and sh["mass"] >= 0.001 else None
         if hinge is None or mass is None or part in existing:
             proxy["id"] = unique(f"{part}_hull")
             chassis_proxies.append(proxy)
