@@ -38,7 +38,7 @@ You don't need to download anything else. PCarsTools expects an Oodle DLL named 
 python convert_all.py
 ```
 
-Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to `_pcars2/cars/<car>/`. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
+Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to one folder per game in the SVJ library, `<library>/Project CARS 2/<car>/`. The library is `$SVJ_LIBRARY`, else the first line of `svj_library.txt` beside the script (ignored by git), else a `svj_library/` folder beside the script. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
 
 ### Automobilista 2
 
@@ -48,9 +48,9 @@ Automobilista 2 uses the same file formats as Project CARS 2, so the same pipeli
 python convert_all.py --edition ams2        # or --game "D:/Steam/steamapps/common/Automobilista 2"
 ```
 
-Output goes to `_ams2/cars/` (not tracked by git). What differs from Project CARS 2:
+Output goes to `<library>/Automobilista 2/`. What differs from Project CARS 2:
 
-- **The cars are the archives.** Most of the physics of an AMS2 car lives only in its own archive (`Pakfiles/Vehicles/<Car>.bff`), under file names that differ from the archive's (`Porsche_963_GTP.bff` holds `porsche_963.*`). The cockpit, livery and low-detail (`_LD`) archives are skipped; 424 cars are converted.
+- **The cars are the archives.** Most of the physics of an AMS2 car lives only in its own archive (`Pakfiles/Vehicles/<Car>.bff`), under file names that differ from the archive's (`Porsche_963_GTP.bff` holds `porsche_963.*`). The cockpit, livery and low-detail (`_LD`) archives are skipped; 426 cars are converted.
 - Engine curve points store the rpm as a float, and spec sheets (`.mrdf`) are 224 bytes with the same field offsets. The sheet's peak torque is in N.m, not lb-ft: against it the engine curve peaks at 1.00 on naturally aspirated cars. Turbo cars read about 0.7: the curve does not include the boost, which is not applied.
 - Tyre files are not matched to the cars (the car-to-tyre link is not in any file read so far), so most AMS2 cars use default tyres, flagged. Cars whose archive has no descriptor of its own (`formula_retro`, `rally_kart`) get an estimated wheelbase and track.
 
@@ -60,7 +60,7 @@ Output goes to `_ams2/cars/` (not tracked by git). What differs from Project CAR
 python convert_all.py --edition pc1
 ```
 
-The edition is also inferred when `--game` points at a folder holding `pCARS.exe`. Output goes to `_pcars1/cars/<car>/`.
+The edition is also inferred when `--game` points at a folder holding `pCARS.exe`. Output goes to `<library>/Project CARS/<car>/`.
 
 What is different from Project CARS 2:
 
@@ -90,10 +90,10 @@ python pc2_to_svj_gui.py
 # Physics -> SVJ (expects physics already extracted into _pcars2/out)
 python pcars2_to_svj.py --dir _pcars2/out --list
 python pcars2_to_svj.py --dir _pcars2/out --car toyota_gt86 --out gt86.svj.json
-python pcars2_to_svj.py --dir _pcars2/out --all --outdir _pcars2/cars
+python pcars2_to_svj.py --dir _pcars2/out --all --outdir "<library>/Project CARS 2"
 
 # 3D models -> GLB, and link each one into its SVJ file
-python pcars2_extract_meshes.py --game "<path to Project CARS 2>" --all --cars-dir _pcars2/cars
+python pcars2_extract_meshes.py --game "<path to Project CARS 2>" --all --cars-dir "<library>/Project CARS 2"
 ```
 
 To extract the physics archives without the GUI, see [PCARS2_EXTRACTION_NOTES.md](PCARS2_EXTRACTION_NOTES.md).

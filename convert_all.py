@@ -55,22 +55,37 @@ SPEC_ZIP = "https://github.com/RFloEng/SVJ-standard-vehicle-json/archive/refs/he
 # and needs --game-type PC1.
 PROFILES = {
     "pc2": {
-        "label": "Project CARS 2", "work": "_pcars2", "steam": ["Project CARS 2"],
+        "label": "Project CARS 2", "library": "Project CARS 2", "work": "_pcars2", "steam": ["Project CARS 2"],
         "exe": "pCARS2.exe", "env": "PCARS2_DIR", "tools": "win-x64", "game_type": None,
         "archives": [("PHYSICSMENU.bff", "PHYSICSMENU"), ("PHYSICSPERSISTENT.bff", "PHYSICSPERSISTENT")],
     },
     "ams2": {
-        "label": "Automobilista 2", "work": "_ams2", "steam": ["Automobilista 2"],
+        "label": "Automobilista 2", "library": "Automobilista 2", "work": "_ams2", "steam": ["Automobilista 2"],
         "exe": "AMS2.exe", "env": "AMS2_DIR", "tools": "win-x64", "game_type": None,
         "archives": [("PHYSICSMENU.bff", "PHYSICSMENU"), ("PHYSICSPERSISTENT.bff", "PHYSICSPERSISTENT")],
     },
     "pc1": {
-        "label": "Project CARS", "work": "_pcars1", "steam": ["pCars", "Project CARS"],
+        "label": "Project CARS", "library": "Project CARS", "work": "_pcars1", "steam": ["pCars", "Project CARS"],
         "exe": "pCARS.exe", "env": "PCARS1_DIR", "tools": "win-x86", "game_type": "PC1",
         "archives": [("PHYSICSPERSISTENT.bff", "PHYSICSPERSISTENT"), ("HRDFPERSISTENT.bff", "HRDFPERSISTENT"),
                      ("PHYSICSBOOTFLOW.bff", "PHYSICSBOOTFLOW")],
     },
 }
+# The SVJ files go to one folder per game under the library (set in $SVJ_LIBRARY or svj_library.txt, or pass --out).
+def _library() -> Path:
+    """$SVJ_LIBRARY, else the first line of svj_library.txt next to this script (kept out of git),
+    else a folder beside the script."""
+    if os.environ.get("SVJ_LIBRARY"):
+        return Path(os.environ["SVJ_LIBRARY"])
+    cfg = HERE / "svj_library.txt"
+    if cfg.is_file():
+        line = cfg.read_text(encoding="utf-8").strip().splitlines()
+        if line and line[0].strip():
+            return Path(line[0].strip())
+    return HERE / "svj_library"
+
+
+LIBRARY = _library()
 PROFILE = PROFILES["pc2"]
 PCARS = HERE / PROFILE["work"]
 TOOLS_EXE = TOOLS_DIR / PROFILE["tools"] / "PCarsTools.exe"
@@ -235,7 +250,7 @@ def main() -> None:
     ap.add_argument("--game", help="game folder (default: auto-detect, or $PCARS2_DIR / $PCARS1_DIR)")
     ap.add_argument("--edition", choices=sorted(PROFILES), default=None,
                     help="pc2 (Project CARS 2, the default) or pc1 (Project CARS); inferred from --game when it holds the exe")
-    ap.add_argument("--out", default=None, help="output folder (default: _pcars2/cars or _pcars1/cars)")
+    ap.add_argument("--out", default=None, help="output folder (default: <SVJ Library>/<game>, svj_library.txt or $SVJ_LIBRARY)")
     ap.add_argument("--car", action="append", help="car name or * pattern; repeatable (default: all)")
     ap.add_argument("--no-meshes", action="store_true", help="physics only: no GLB, collision or hinges")
     ap.add_argument("--resume", action="store_true", help="skip the model step for cars that already have a GLB")
@@ -248,7 +263,7 @@ def main() -> None:
     _EDITION = edition
     configure(edition)
     if args.out is None:
-        args.out = str(PCARS / "cars")
+        args.out = str(LIBRARY / PROFILE["library"])
     t0 = time.time()
     step(f"Locating {PROFILE['label']}")
     game = find_game(args.game)
@@ -319,7 +334,7 @@ def main() -> None:
         ensure_tools(game)
         meshes = load("pcars2_extract_meshes")
         meshes.set_game_type(PROFILE["game_type"])
-        work = out.parent / "mesh_work"
+        work = PCARS / "mesh_work"
         for i, car in enumerate(ok, 1):
             if args.resume and (out / car / f"{car}.glb").is_file():
                 mesh_ok.append(car)

@@ -11,3 +11,5 @@ svj_spec/
 __pycache__/
 *.pyc
 _ams2/
+svj_library.txt
+svj_library/
