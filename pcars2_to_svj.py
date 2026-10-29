@@ -332,8 +332,15 @@ def _parse_driveline(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]
 
 def _extra_diffs(dl_info: Optional[Dict], drive: Optional[str], driven: str) -> List[Dict]:
     """Front/centre diffs of an AWD car, as listed by its driveline.rg setup."""
-    if not dl_info or drive != "AWD":
+    if drive != "AWD":
         return []
+    if not dl_info:
+        # No driveline setup for this car (Project CARS has none): an all-wheel-drive car still
+        # needs a front and a centre differential. Open ones, flagged, final drive 1.0.
+        return [{"id": f"diff_{loc}", "location": loc, "type": "open", "final_drive": 1.0, "_est": True,
+                 "_note": (f"No driveline setup lists this car's {loc} differential: an open one is "
+                           "assumed so the all-wheel drive is complete; final_drive 1.0 is a placeholder.")}
+                for loc in ("front", "center") if loc != driven]
     out = []
     for loc in ("front", "center", "rear"):
         if loc in dl_info["diffs"] and loc != driven:
@@ -2358,8 +2365,10 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         brakes["_max_brake_torque_Nm"] = {"front": cc[0]["brake_torque_Nm"], "rear": cc[2]["brake_torque_Nm"]}
         if chassis_data.get("brake_bias_rear") is not None:
             brakes["_brake_bias_rear"] = round(chassis_data["brake_bias_rear"], 3)
-        brakes["_chassis_file_note"] = ("BrakeTorque per axle and RearBrakeRange (rear share of "
-                                        "the brake force) from the chassis file; no SVJ field yet.")
+            brakes["bias"] = round(1.0 - chassis_data["brake_bias_rear"], 3)      # front share
+            brakes["bias_type"] = "adjustable"
+        brakes["_chassis_file_note"] = ("BrakeTorque per axle from the chassis file (no SVJ field); "
+                                        "bias is the front share, 1 - RearBrakeRange default.")
 
     metadata = _metadata(
         car=car, extracted_root=extracted_root,
@@ -2387,6 +2396,16 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         p for p in metadata["_known_placeholders"]
         if p.split(" ")[0] not in resolved
     ]
+
+    def _reword(prefix: str, text: str) -> None:
+        metadata["_known_placeholders"] = [text if p.startswith(prefix) else p
+                                           for p in metadata["_known_placeholders"]]
+    if chassis_data.get("cg_height_m") is not None:
+        _reword("chassis.center_of_gravity", "chassis.center_of_gravity (height approximate: CGHeight plus "
+                "ride height, reference plane inferred; X from the weight split)")
+    if chassis_data.get("steering_ratio"):
+        _reword("steering.*", "steering.* (rack position and travel are placeholders; ratio and lock "
+                "from the chassis file)")
 
     vehicle_info = _vehicle_info(car)
     if drive:
