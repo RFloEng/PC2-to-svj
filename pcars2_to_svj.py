@@ -2320,6 +2320,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
             clutch_svj["_source"] = f"driveline.rg group {dl_info['group']}"
         if dl_info.get("crank_inertia"):
             engine["inertia"] = dl_info["crank_inertia"]
+            engine["x_driveline_crank_inertia"] = dl_info["crank_inertia"]
             engine["_inertia_source"] = ("driveline.rg crankshaft mass (1-D shaft inertia, "
                                          "game units taken as kg*m^2)")
     else:
@@ -2327,6 +2328,16 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         if "SemiAutomatic" in driveline:
             gearbox_svj["type"] = "sequential" if driveline["SemiAutomatic"] == 1 else "manual"
             gearbox_svj["_note"] = gearbox_svj.get("_note", "") + " type from the chassis file (SemiAutomatic)."
+    # The engine file's own EngineInertia (field hash 4665ae87 = lookup2 of ENGINEINERTIA, the
+    # game's name hash) is the engine's rotating inertia; it replaces the driveline.rg figure.
+    if sf_edf is not None:
+        raw_e = sf_edf._buf
+        j = raw_e.find(bytes.fromhex("4665ae87"))
+        if j >= 1 and raw_e[j - 1] == 0x22 and j + 8 <= len(raw_e):
+            ei = struct.unpack_from("<f", raw_e, j + 4)[0]
+            if 0.005 <= ei <= 5.0:
+                engine["inertia"] = round(ei, 5)
+                engine["_inertia_source"] = "engine file EngineInertia (kg*m^2, units as the game's)"
     if clutch_svj is None and driveline.get("ClutchTorque"):
         clutch_svj = {"max_torque": round(driveline["ClutchTorque"], 1), "_source": "chassis file (ClutchTorque)"}
         if driveline.get("ClutchInertia"):
