@@ -2237,6 +2237,13 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         engine["x_aspiration"] = mrdf_data["boost_type"]
     if dirs.get("game") == "ams2":
         _apply_boost_map(engine, _boost_map(sf_edf), mrdf_data.get("torque_Nm"))
+        # the engine file's default wastegate setting (a percentage); field hash ca2fd134 =
+        # lookup2 of WASTEGATEPERCENTAGESETTING, the game's own name hash (read from AMS2.exe)
+        if sf_edf is not None and "x_boost_map" in engine:
+            raw = sf_edf._buf
+            i = raw.find(bytes.fromhex("ca2fd134"))
+            if i >= 1 and raw[i - 1] == 0x20 and i + 4 < len(raw):
+                engine["x_boost_map"]["default_wastegate_percentage"] = raw[i + 4]
     try:
         turbo_units = parse_turbo(_car_file(dirs, "turbo", car, "tbfbin"))
     except Exception as exc:                     # a malformed file must not stop the car
