@@ -736,7 +736,7 @@ def _parse_mrdf(dirs: Dict[str, Optional[str]], car: str) -> Optional[Dict]:
     if 1.0 <= acc <= 30.0:
         out["accel_0_100kph_s"] = round(acc, 2)
     tq, hp = f32(68), f32(72)
-    if 20.0 <= tq <= 2500.0:
+    if 20.0 <= tq <= 6000.0:               # trucks reach 3 700 N.m
         # the sheet gives lb-ft (Project CARS 2) or N.m (Automobilista 2: peak torque of the
         # engine curve is 1.00 of it on 260 naturally aspirated cars)
         out["torque_Nm"] = round(tq * (1.0 if len(data) == 224 else 1.355818), 1)
@@ -1039,13 +1039,17 @@ def _apply_boost_map(engine: Dict, boost: Dict[int, List[float]], sheet_torque: 
         err = abs(peak / sheet_torque - 1)
         if best is None or err < best[0]:
             best = (err, k)
-    if best and best[0] <= 0.05 and best[1] > 0:
+    # No level within 5 %: the closest one is taken when it is clearly nearer to the sheet than
+    # the unboosted curve (the sheet is a rounded figure that need not be one of the levels)
+    near = best and best[1] > 0 and best[0] <= 0.15 and         best[0] < 0.5 * abs(max(t for _, t in base) / sheet_torque - 1)
+    if best and ((best[0] <= 0.05 and best[1] > 0) or near):
         k = best[1]
         engine["x_unboosted_torque_curve"] = base
         engine["torque_curve"] = [[r, round(t * mult(r, k), 2)] for r, t in base]
         engine["_boost_note"] = (f"torque_curve is the unboosted curve times boost level {k} of the "
                                  "engine file's boost map, the level whose peak torque equals the spec "
-                                 "sheet's (within 5 %); the unboosted curve is x_unboosted_torque_curve")
+                                 "sheet's (within 5 %, or the nearest within 15 % where none fits; "
+                                 f"{best[0]*100:.1f} % off here); the unboosted curve is x_unboosted_torque_curve")
 
 
 def build_gearbox(sf_gdf: Optional[ShCBFile], car: str) -> Dict:
@@ -2270,6 +2274,8 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     if trans:
         gearbox_svj["ratios"] = trans["ratios"]
         gearbox_svj.pop("_est", None)
+        if trans.get("gears_dropped"):
+            gearbox_svj["_est"] = True      # the chassis file names more gears than its settings fit
         if trans.get("final_drive"):
             final_drive = trans["final_drive"]
         gearbox_svj["_note"] = (
@@ -2278,6 +2284,8 @@ def convert_car(car: str, extracted_root: str) -> Dict:
             "the final-drive setting times the bevel"
             + (" (the setting pointed past the last option: the last was used)"
                if trans.get("final_drive_clamped") else "")
+            + (f"; the last {trans['gears_dropped']} gear setting(s) did not fit the list and were dropped"
+               if trans.get("gears_dropped") else "")
             + ". Checked on the Toyota GT86 against the game's setup screen.")
         if trans.get("final_drive_options"):
             gearbox_svj["x_pcars2"] = {"final_drive_options": trans["final_drive_options"]}

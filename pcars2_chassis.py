@@ -389,6 +389,14 @@ def select_transmission(lists: Optional[Dict[str, Any]], dl: Dict[str, float]) -
         # setting for the rest. When the file offers exactly one ratio per gear and the
         # settings that are stored count up from zero, the list is the gearbox.
         known = [int(dl[name]) for name in _GEAR_SETTINGS[:n] if name in dl]
+        rev = int(dl.get("ReverseGearSetting", -1))
+        if len(gears) == n + 1 and 0 <= rev <= n:
+            # one extra entry that the reverse setting points at: reverse is in the list
+            # (read this way on the Maserati GT2 Stradale, 8 gears with 7 stored settings)
+            by_pos = [k - (1 if k > rev else 0) for k in known]
+            if rev not in known and all(a < b for a, b in zip(by_pos, by_pos[1:]))                     and by_pos == list(range(len(by_pos))):
+                gears = gears[:rev] + gears[rev + 1:]
+                known = by_pos
         if len(gears) != n or known != list(range(len(known))):
             return None
         idx = list(range(n))
@@ -398,16 +406,27 @@ def select_transmission(lists: Optional[Dict[str, Any]], dl: Dict[str, float]) -
         return None
     ratios = None
     order = "forward"
+    trimmed = 0
     by_size = sorted(gears, reverse=True)
-    for label, pick in (("forward", lambda k: gears[k]), ("reversed", lambda k: gears[len(gears) - 1 - k]),
-                        ("sorted", lambda k: by_size[k])):
-        r = [pick(k) for k in idx]
-        if all(a > b for a, b in zip(r, r[1:])) or (n == 1):
-            ratios, order = r, label
+    picks = (("forward", lambda k: gears[k]), ("reversed", lambda k: gears[len(gears) - 1 - k]),
+             ("sorted", lambda k: by_size[k]))
+    # strictly falling first; then equal neighbours allowed (a truck lists 3.62 twice); then
+    # the trailing settings dropped one at a time (a 4-speed box whose chassis still names six)
+    for keep, strict in [(m, True) for m in (n,)] + [(n, False)] + [(m, True) for m in range(n - 1, 2, -1)]:
+        for label, pick in picks:
+            r = [pick(k) for k in idx[:keep]]
+            ok = all((a > b) if strict else (a >= b) for a, b in zip(r, r[1:])) or keep == 1
+            if ok:
+                ratios, order, trimmed = r, label, n - keep
+                break
+        if ratios is not None:
             break
     if ratios is None:
         return None
+    n -= trimmed
     out: Dict[str, Any] = {"ratios": [round(r, 5) for r in ratios], "gear_count": n, "index_order": order}
+    if trimmed:
+        out["gears_dropped"] = trimmed
     finals = lists["finals"]
     if finals:
         fi = int(dl.get("FinalDriveSetting", 0))
