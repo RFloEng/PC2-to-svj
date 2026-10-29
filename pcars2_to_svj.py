@@ -453,6 +453,26 @@ def list_cars(extracted_root: str) -> List[str]:
     )
 
 
+def _tyre_from_vdfm(dirs: Dict[str, Optional[str]], car: str) -> Optional[str]:
+    """
+    The tyre file a car's descriptor names (Automobilista 2). The .vdfm lists, as plain
+    strings, the files its car loads (clutch, turbo, failure set, tyres); the tyre one is
+    the string that matches a .hdtbin by name, whatever the case.
+    """
+    tyres, veh = dirs.get("tyres"), dirs.get("vehicles")
+    if dirs.get("game") != "ams2" or not tyres or not veh:
+        return None
+    p = Path(veh) / f"{_VDFM_ALIASES.get(car, car)}.vdfm"
+    if not p.is_file():
+        return None
+    known = {f.stem.lower(): f for f in Path(tyres).glob("*.hdtbin")}
+    for raw in re.findall(rb"[ -~]{4,}", p.read_bytes()):
+        hit = known.get(raw.decode("ascii").lower())
+        if hit:
+            return str(hit)
+    return None
+
+
 def _car_file(dirs: Dict[str, Optional[str]], subdir: str,
               car: str, ext: str) -> Optional[str]:
     """
@@ -962,6 +982,63 @@ def build_engine(sf_edf: Optional[ShCBFile], car: str) -> Dict:
             "displacement/configuration not encoded in pCARS2 physics files."
         ),
     }
+
+
+def _boost_map(sf_edf: Optional[ShCBFile]) -> Dict[int, List[float]]:
+    """
+    The engine file's multi-column curve (hash 515f5e83): per rpm, the torque multiplier at
+    each boost level (Automobilista 2; column 0 is 1.0, the unboosted curve). The file does
+    not say which column a car runs by default.
+    """
+    out: Dict[int, List[float]] = {}
+    if sf_edf is None:
+        return out
+    for r in sf_edf.get_all("515f5e83"):
+        if r.type_code == 0x96 and len(r.body) >= 25:
+            pt = r.decode_multicol_curve_point()
+            if pt:
+                out[int(pt[0])] = [round(float(v), 4) for v in pt[1]]
+    return out
+
+
+def _apply_boost_map(engine: Dict, boost: Dict[int, List[float]], sheet_torque: Optional[float]) -> None:
+    """Store the boost map; use its column whose peak torque matches the spec sheet's (within 5 %)."""
+    if not boost or not engine.get("torque_curve"):
+        return
+    ks = sorted(boost)
+
+    def mult(rpm: float, k: int) -> float:
+        if rpm <= ks[0]:
+            return boost[ks[0]][k]
+        if rpm >= ks[-1]:
+            return boost[ks[-1]][k]
+        for a, b in zip(ks, ks[1:]):
+            if a <= rpm <= b:
+                t = (rpm - a) / (b - a)
+                return boost[a][k] * (1 - t) + boost[b][k] * t
+        return 1.0
+
+    engine["x_boost_map"] = {
+        "rpm": ks, "torque_multiplier_by_level": [boost[k] for k in ks],
+        "_note": ("engine file multi-column curve: per rpm, the torque multiplier at each boost level "
+                  "(level 0 = 1.0, the unboosted curve in torque_curve). The file does not say which "
+                  "level a car runs by default.")}
+    if not sheet_torque:
+        return
+    base = engine["torque_curve"]
+    best = None
+    for k in range(len(boost[ks[0]])):
+        peak = max(t * mult(r, k) for r, t in base)
+        err = abs(peak / sheet_torque - 1)
+        if best is None or err < best[0]:
+            best = (err, k)
+    if best and best[0] <= 0.05 and best[1] > 0:
+        k = best[1]
+        engine["x_unboosted_torque_curve"] = base
+        engine["torque_curve"] = [[r, round(t * mult(r, k), 2)] for r, t in base]
+        engine["_boost_note"] = (f"torque_curve is the unboosted curve times boost level {k} of the "
+                                 "engine file's boost map, the level whose peak torque equals the spec "
+                                 "sheet's (within 5 %); the unboosted curve is x_unboosted_torque_curve")
 
 
 def build_gearbox(sf_gdf: Optional[ShCBFile], car: str) -> Dict:
@@ -2091,7 +2168,7 @@ def convert_car(car: str, extracted_root: str) -> Dict:
     cdf_path = _car_file(dirs, "chassis",    car, "cdfbin")
     gdf_path = _car_file(dirs, "gearbox",    car, "gdfbin")
     sdf_path = _car_file(dirs, "suspension", car, "sdfbin")
-    hdt_path = _car_file(dirs, "tyres",      car, "hdtbin")
+    hdt_path = _tyre_from_vdfm(dirs, car) or _car_file(dirs, "tyres",      car, "hdtbin")
 
     _report_files(edfbin=edf_path, cdfbin=cdf_path, gdfbin=gdf_path,
                   sdfbin=sdf_path, hdtbin=hdt_path)
@@ -2147,6 +2224,8 @@ def convert_car(car: str, extracted_root: str) -> Dict:
         engine["configuration"] = mrdf_data["engine_configuration"]
     if mrdf_data.get("boost_type"):
         engine["x_aspiration"] = mrdf_data["boost_type"]
+    if dirs.get("game") == "ams2":
+        _apply_boost_map(engine, _boost_map(sf_edf), mrdf_data.get("torque_Nm"))
     try:
         turbo_units = parse_turbo(_car_file(dirs, "turbo", car, "tbfbin"))
     except Exception as exc:                     # a malformed file must not stop the car

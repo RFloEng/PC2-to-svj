@@ -294,7 +294,7 @@ def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
             {
                 "id":          mesh_id,
                 "uri":         glb_uri,
-                "description": "Project CARS 2 vehicle mesh (auto-extracted, LOD-A)",
+                "description": f"{svj.get('_metadata', {}).get('_source_game') or 'Project CARS'} vehicle mesh (auto-extracted, LOD-A)",
             }
         ]
     }

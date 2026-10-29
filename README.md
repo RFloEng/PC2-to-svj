@@ -51,8 +51,8 @@ python convert_all.py --edition ams2        # or --game "D:/Steam/steamapps/comm
 Output goes to `<library>/Automobilista 2/`. What differs from Project CARS 2:
 
 - **The cars are the archives.** Most of the physics of an AMS2 car lives only in its own archive (`Pakfiles/Vehicles/<Car>.bff`), under file names that differ from the archive's (`Porsche_963_GTP.bff` holds `porsche_963.*`). The cockpit, livery and low-detail (`_LD`) archives are skipped; 426 cars are converted.
-- Engine curve points store the rpm as a float, and spec sheets (`.mrdf`) are 224 bytes with the same field offsets. The sheet's peak torque is in N.m, not lb-ft: against it the engine curve peaks at 1.00 on naturally aspirated cars. Turbo cars read about 0.7: the curve does not include the boost, which is not applied.
-- Tyre files are not matched to the cars (the car-to-tyre link is not in any file read so far), so most AMS2 cars use default tyres, flagged. Cars whose archive has no descriptor of its own (`formula_retro`, `rally_kart`) get an estimated wheelbase and track.
+- Engine curve points store the rpm as a float, and spec sheets (`.mrdf`) are 224 bytes with the same field offsets. The sheet's peak torque is in N.m, not lb-ft: against it the engine curve peaks at 1.00 on naturally aspirated cars. Turbo cars read about 0.7 because the curve is the unboosted one. The engine file also holds a boost map (torque multiplier per rpm at five boost levels, kept in `engine.x_boost_map`); the file does not say which level a car runs, so where one level's peak equals the spec sheet's (within 5 %, 64 of 144 cars with a map) that level is applied and the unboosted curve is kept as `x_unboosted_torque_curve`, flagged. The other 80 keep the unboosted curve.
+- **Tyres** are found through the car's descriptor (`.vdfm`), which lists as plain strings the files its car loads (clutch, turbo, failure set, tyres): the string that matches a `.hdtbin` by name is the tyre file. 22 cars name none and use defaults, flagged. Cars whose archive has no descriptor of its own (`formula_retro`, `rally_kart`) get an estimated wheelbase and track.
 
 ### Project CARS (the first game)
 
