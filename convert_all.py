@@ -127,6 +127,7 @@ def load(name: str):
     path = HERE / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, str(path))
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod            # worker processes import it again by name
     spec.loader.exec_module(mod)
     return mod
 
@@ -256,6 +257,7 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true", help="skip the model step for cars that already have a GLB")
     ap.add_argument("--reextract", action="store_true", help="unpack the physics archives again")
     ap.add_argument("--keep-work", action="store_true", help="keep the temporary model extraction folders")
+    ap.add_argument("--no-usd", action="store_true", help="keep the GLB as the model asset (no OpenUSD copy)")
     args = ap.parse_args()
 
     global _EDITION
@@ -349,6 +351,16 @@ def main() -> None:
                 good = False
             (mesh_ok if good else mesh_failed).append(car)
 
+    usd_ok = []
+    if not args.no_meshes and not args.no_usd:
+        usd = load("svj_usd")
+        if usd.available():
+            step(f"Writing OpenUSD copies of the models (spec 22.10): {len(mesh_ok)} cars")
+            usd_ok = [c for c, st in usd.convert_all(out, cars=mesh_ok) if st == "ok"]
+            print(f"  {len(usd_ok)}/{len(mesh_ok)} cars use a USD asset, the GLB is its preview")
+        else:
+            print("  [NOTE] usd-core is not installed (pip install usd-core): the GLB stays the model asset")
+
     step("Validating against the SVJ schema")
     for car in ok:
         path = out / car / f"{car}.svj.json"
@@ -376,7 +388,8 @@ def main() -> None:
             except (OSError, ValueError):
                 pass
         rows.append({"car": car, "svj": car in ok, "schema_valid": car in ok and car not in bad,
-                     "glb": (out / car / f"{car}.glb").is_file(), "hinged_parts": hinged})
+                     "glb": (out / car / f"{car}.glb").is_file(),
+                     "usd": (out / car / f"{car}.usdz").is_file(), "hinged_parts": hinged})
     with open(out / "batch_summary.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0]))
         w.writeheader()

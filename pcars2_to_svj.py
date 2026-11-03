@@ -138,7 +138,7 @@ except ImportError:
 # Directory / file helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.102"
+SVJ_VERSION = "0.106"
 _migrator = None
 
 
@@ -2510,7 +2510,8 @@ def _prune_bindings(svj: Dict, svj_dir: Path) -> None:
     Drop visual bindings that don't resolve: mesh_ref not in assets.meshes,
     or a node name the referenced GLB doesn't contain (when it can be read).
     """
-    meshes = {m["id"]: m.get("uri") for m in svj.get("assets", {}).get("meshes", [])
+    # A USD asset has no node list we can read without usd-core: its GLB preview carries the same names.
+    meshes = {m["id"]: (m.get("preview") or m.get("uri")) for m in svj.get("assets", {}).get("meshes", [])
               if isinstance(m, dict) and "id" in m}
     names_cache: Dict[str, Optional[set]] = {}
 
