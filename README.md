@@ -1,11 +1,12 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** and **Project CARS** into SVJ (Standard Vehicle JSON) v0.102 files, with matching **GLB** 3D models.
+Converts the cars in **Project CARS 2** and **Project CARS** and **Automobilista 2** into SVJ (Standard Vehicle JSON) v0.106 files, with matching 3D models (**GLB** and **OpenUSD**).
 
 You point it at your own Project CARS 2 (or Project CARS) installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
-- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.102 schema
+- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.106 schema
 - one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse, normal and specular textures), linked from the SVJ file through SVJ visual bindings
+- one `.usdz` per car, an OpenUSD copy of that model (spec 22.10) with the textures baked in. The SVJ file lists the USD as its model asset and keeps the GLB as the `preview` copy for viewers that read glTF only
 
 All 212 drivable Project CARS 2 cars convert. Project CARS is supported through a game profile (`--edition pc1`, see below).
 
@@ -20,13 +21,13 @@ All 212 drivable Project CARS 2 cars convert. Project CARS is supported through 
   ```bash
   pip install numpy pygltflib pillow scipy jsonschema
   ```
-  `numpy` and `pygltflib` are required for 3D models. `pillow` adds textures, `scipy` is optional, and `jsonschema` enables schema validation.
+  `numpy` and `pygltflib` are required for 3D models. `pillow` adds textures, `scipy` is optional, and `jsonschema` enables schema validation. `usd-core` (`pip install usd-core`) is optional: with it the converter also writes the OpenUSD copies, without it the GLB stays the model asset.
 - [PCarsTools 1.1.4](https://github.com/Nenkai/PCarsTools/releases/tag/1.1.4) by Nenkai, which decrypts the game's archives. Place it at:
   ```
   _pcars2/tools/win-x64/PCarsTools.exe
   ```
 - A .NET runtime, version 7 or newer. PCarsTools targets .NET 6; the converter lets it run on a newer runtime automatically.
-- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.102), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
+- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.106), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
 
 You don't need to download anything else. PCarsTools expects an Oodle DLL named `oo2core_7_win64.dll`, and the converter copies the game's own `oo2core_4_win64.dll` under that name.
 
@@ -38,7 +39,7 @@ You don't need to download anything else. PCarsTools expects an Oodle DLL named 
 python convert_all.py
 ```
 
-Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to one folder per game in the SVJ library, `<library>/Project CARS 2/<car>/`. The library is `$SVJ_LIBRARY`, else the first line of `svj_library.txt` beside the script (ignored by git), else a `svj_library/` folder beside the script. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
+Finds the game, unpacks the physics archives (first run only), converts every car's physics, extracts each car's 3D model, collision hulls and hinges, validates the result and writes `batch_summary.csv`. Output goes to one folder per game in the SVJ library, `<library>/Project CARS 2/<car>/`. The library is `$SVJ_LIBRARY`, else the first line of `svj_library.txt` beside the script (ignored by git), else a `svj_library/` folder beside the script. Useful options: `--game "<path>"`, `--car toyota_gt86` (repeatable, `*` patterns allowed), `--no-meshes` (physics only), `--resume` (skip cars that already have a GLB), `--no-usd` (keep the GLB as the model asset, no OpenUSD copy), `--out <folder>`. The SVJ specification is downloaded into `svj_spec/` if missing (it is used for schema validation and the collision overlap check).
 
 ### Automobilista 2
 
@@ -94,6 +95,9 @@ python pcars2_to_svj.py --dir _pcars2/out --all --outdir "<library>/Project CARS
 
 # 3D models -> GLB, and link each one into its SVJ file
 python pcars2_extract_meshes.py --game "<path to Project CARS 2>" --all --cars-dir "<library>/Project CARS 2"
+
+# OpenUSD copy of every GLB (needs usd-core); the SVJ then lists the .usdz and keeps the GLB as preview
+python svj_usd.py "<library>/Project CARS 2" --jobs 4
 ```
 
 To extract the physics archives without the GUI, see [PCARS2_EXTRACTION_NOTES.md](PCARS2_EXTRACTION_NOTES.md).
@@ -104,7 +108,7 @@ To extract the physics archives without the GUI, see [PCARS2_EXTRACTION_NOTES.md
 _pcars2/
   out/            unpacked physics archives
   cars/
-    <car>/        <car>.svj.json and <car>.glb, side by side
+    <car>/        <car>.svj.json, <car>.glb and <car>.usdz, side by side
 ```
 
 Run the physics conversion again after extracting models and the mesh links are kept.
@@ -143,11 +147,14 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 
 **3D models** follow SVJ spec 22.4: glTF Y-up, +X right, -Z forward, with the origin at the front-axle midpoint on the ground, so a GLB lines up with the SVJ's hardpoints without any extra transform. The game's mesh space is left-handed, so the conversion mirrors it (and reverses triangle winding). Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game. Parts are grouped under nodes named by the SVJ naming convention (`SVJ::body::chassis`, `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel`, …), and the SVJ file binds only the nodes its GLB actually contains.
 
+**OpenUSD** (spec 22.10, v0.105 / v0.106). `svj_usd.py` converts each GLB with the specification's `tools/gltf2usd.py` (metres, the `SVJ::category::id` names as `svj:node`, UsdPreviewSurface materials with base colour, normal, metallic-roughness, occlusion and emissive textures baked into the `.usdz`) and rewrites the car's `assets.meshes` entry as `uri` `<car>.usdz`, `format` `usd`, `preview` `<car>.glb`. Only shapes and appearance go into the USD; every physical datum stays in the SVJ JSON, as the spec requires. The glTF specular-colour map (`KHR_materials_specular`) is not carried over by the specification's converter, so only the GLB keeps it. Because the GLB axes are Y-up and -Z forward while the physics stays SAE J670, a car with a model declares `_metadata.coordinate_system` as `{up: Y, forward: -Z, handedness: right}` (spec 22.4); the spec's `integrity_check.py --meshes` checks both files.
+
 ## Known limitations
 
 - Beam and live axles are written as an axle body that the decoded link records locate (`solid_axle`, 22 PC2 and 13 PC1 cars). The axle body mass is an estimate, and where a corner's link records are too few to locate the axle the game's own layout is kept as is. PC1 chassis files carry no differential records and PC1 has no `driveline.rg`, so PC1 differentials stay open; an all-wheel-drive car with no driveline setup gets an open front and centre differential, flagged `_est`. Neither game stores a drag coefficient.
 - Project CARS (PC1) data has not been compared with the game's setup screens. Geared top speed at the rev limiter is a median 0.91 (PC2) and 0.82 (PC1) of the spec-sheet top speed, and is no precise check: the sheet's speed also depends on drag and on the gear set the sheet assumes.
 - Tyre models have inverted normals in the game's own source data, so tyres may look flat-shaded.
+- Material factors are not read from the game's `.bmt` materials: metallic and roughness are constants (paint 0.7 metallic), and the shader parameters that file holds (Fresnel, specular power range, environment-map factor, emissive texture for lights) are not used yet. The OpenUSD copy needs `usd-core` and loses the specular-colour map (see above).
 - Textures are capped at 512 px. Specular maps are approximated: gloss becomes roughness, and the specular colour uses the optional `KHR_materials_specular` extension as a reflectance mask.
 - Suspension geometry comes from the game's link records. The converter infers `system_type` and link names from the layout: double wishbone, MacPherson, multi-link, trailing arm or semi-trailing arm. Some strut cars are stored by the game as a long virtual upper arm, and those links carry a `_note`. Corners the game data leaves one link short get a flagged estimated toe or upper link so every corner has the 5 constraints it needs; trailing and semi-trailing arms end on `wheel_center`; a MacPherson strut runs from its top mount to an estimated lower point on the upright, and its spring and damper mounts follow it. Torsion beams, unusual layouts and the cars whose suspension file lacks wheel-position records keep a representative double-wishbone estimate, flagged `_est`.
 
@@ -164,6 +171,7 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 | `pcars2_hashnames.json` | Hash → field name map for those files |
 | `pcars2_collision.py` | Collision XML → hinged parts, joints, poses and collision proxies |
 | `meb_to_glb.py` | Builds GLB files from `.meb` mesh parts |
+| `svj_usd.py` | OpenUSD copy of each GLB (SVJ spec 22.10), through the specification's own `gltf2usd.py` |
 | `meb_reader.py` | `.meb` mesh format reader |
 | `shcb_reader.py` | Reader for the `ShCB` physics container (`.edfbin`, `.gdfbin`, …) |
 | `pcars2_names.py` | Matches car names to the game's differently named files |
