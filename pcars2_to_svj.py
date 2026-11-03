@@ -2618,6 +2618,16 @@ def apply_collision_sidecar(svj: Dict, svj_path: Any) -> Optional[Dict[str, int]
     return _collision_mod.apply_collision(svj, data)
 
 
+# The extracted GLBs are Y up with -Z forward (glTF/Blender); the physics stays SAE J670 (spec 22.4).
+GLB_AXES = {"up": "Y", "forward": "-Z", "handedness": "right"}
+
+
+def declare_glb_axes(svj: Dict) -> None:
+    """Once an SVJ has a mesh asset, its coordinate_system describes the asset's axes."""
+    if svj.get("assets", {}).get("meshes"):
+        svj.setdefault("_metadata", {})["coordinate_system"] = dict(GLB_AXES)
+
+
 def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
     """
     Write an SVJ dict to disk, preserving mesh links and visual bindings
@@ -2648,6 +2658,7 @@ def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
                 svj.clear(); svj.update(fresh)
         except (OSError, ValueError):
             pass   # unreadable old file: just overwrite it
+    declare_glb_axes(svj)
     apply_collision_sidecar(svj, p)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:

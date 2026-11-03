@@ -70,6 +70,7 @@ _spec_c = importlib.util.spec_from_file_location("pcars2_to_svj", str(_HERE / "p
 _conv_mod = importlib.util.module_from_spec(_spec_c)
 _spec_c.loader.exec_module(_conv_mod)
 apply_bindings = _conv_mod.apply_bindings
+declare_glb_axes = _conv_mod.declare_glb_axes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +300,7 @@ def _update_svj_assets(svj_path: str, car_name: str, glb_uri: str,
         ]
     }
     apply_bindings(svj, mesh_id, svj_nodes or [])
+    declare_glb_axes(svj)
     _apply_vhf(svj, vhf_data)
 
     with open(svj_path, "w", encoding="utf-8") as f:
