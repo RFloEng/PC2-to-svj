@@ -39,7 +39,7 @@ FRAMES = (SAE, ISO)
 VECTOR_KEYS = {
     "position", "center_of_gravity", "rack_position", "end_points", "end_seats", "pivot_position", "pendulum_pivot",
     "pendulum_axis", "attach_point", "cg_position", "beam_position", "center_of_pressure", "linkage_points",
-    "input_flange", "output_flange", "output_front", "output_rear", "output_left", "output_right",
+    "input_flange", "output_flange", "output_front", "output_rear", "output_left", "output_right", "column_axis",
 }
 # Dictionaries whose entries are named positions when the value is a bare 3-vector (corner or side keyed).
 SIDE_KEYS = {"FL", "FR", "RL", "RR", "left", "right"}

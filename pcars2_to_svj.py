@@ -139,7 +139,7 @@ except ImportError:
 # Directory / file helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.109"
+SVJ_VERSION = "0.111"
 _migrator = None
 
 
@@ -2639,6 +2639,80 @@ def to_iso_8855(svj: Dict) -> None:
     svj.update(new)
 
 
+def _qmul(a, b):
+    """Hamilton product of two [x, y, z, w] quaternions."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
+
+
+def _inertia_matrix(i):
+    """Matrix of an inertia object in the SVJ convention (off-diagonals are minus the products)."""
+    if not isinstance(i, dict):
+        return None
+    g = lambda k: float(i.get(k, 0.0) or 0.0)
+    return np.array([[g("Ixx"), -g("Ixy"), -g("Ixz")], [-g("Ixy"), g("Iyy"), -g("Iyz")], [-g("Ixz"), -g("Iyz"), g("Izz")]])
+
+
+def _steiner(m, d):
+    return m * (float(d @ d) * np.eye(3) - np.outer(d, d))
+
+
+def finish_v111(svj: Dict) -> None:
+    """What SVJ v0.111 asks of a finished ISO 8855 file (spec 7.4, 24.4): the wheel hinge axis points left, every body
+    with mass has an inertia, and the chassis inertia minus the listed bodies is physical."""
+    ch = svj.get("chassis", {})
+    # wheel spin is positive forward: the hinge +Z must point left (+Y) in ISO 8855 (spec 24.4)
+    for c in svj.get("constraints", []):
+        if c.get("joint_type") == "revolute" and str(c.get("body_b", "")).startswith("wheel_"):
+            for key in ("frame_a", "frame_b"):
+                q = (c.get(key) or {}).get("orientation")
+                if isinstance(q, list) and len(q) == 4 and 2 * (q[1] * q[2] - q[0] * q[3]) < 0:
+                    c[key]["orientation"] = [round(v, 7) + 0.0 for v in _qmul(q, [1.0, 0.0, 0.0, 0.0])]
+    # inertia for the bodies the migration derives from the unsprung masses
+    tracks = {"front": ch.get("track_front", 1.5), "rear": ch.get("track_rear", 1.5)}
+    for b in ch.get("mass_bodies", []):
+        m = b.get("mass")
+        if not isinstance(m, (int, float)) or m <= 0 or b.get("inertia"):
+            continue
+        bid = str(b.get("id", ""))
+        if "axle" in bid:                                     # a tube across the car
+            L, r = tracks["front" if "front" in bid else "rear"], 0.06
+            ixz = m * (L * L / 12 + r * r / 4)
+            b["inertia"] = {"Ixx": round(ixz, 4), "Iyy": round(m * r * r / 2, 4), "Izz": round(ixz, 4),
+                            "Ixy": 0.0, "Ixz": 0.0, "Iyz": 0.0}
+            b["_inertia_source"] = "estimated: axle tube of the track length, 6 cm radius"
+        else:                                                 # an upright: a compact lump
+            i = round(0.4 * m * 0.12 ** 2, 4)
+            b["inertia"] = {"Ixx": i, "Iyy": i, "Izz": i, "Ixy": 0.0, "Ixz": 0.0, "Iyz": 0.0}
+            b["_inertia_source"] = "estimated: solid sphere of 12 cm radius"
+    # chassis remainder (composite minus the listed bodies) must be positive definite and satisfy the triangle inequality
+    M, cg, comp = ch.get("mass_total"), ch.get("center_of_gravity"), _inertia_matrix(ch.get("inertia"))
+    bodies = [b for b in ch.get("mass_bodies", []) if isinstance(b.get("mass"), (int, float)) and b["mass"] > 0
+              and isinstance(b.get("position"), list) and len(b["position"]) == 3]
+    if not (M and cg and comp is not None and bodies):
+        return
+    cg = np.array(cg, float)
+    m0 = M - sum(b["mass"] for b in bodies)
+    if m0 <= 1.0:
+        return
+    p0 = (M * cg - sum(b["mass"] * np.array(b["position"], float) for b in bodies)) / m0
+    acc = comp.copy()
+    for b in bodies:
+        ib = _inertia_matrix(b.get("inertia")) if b.get("inertia") else np.eye(3) * b["mass"] * 0.02 ** 2
+        acc = acc - ib - _steiner(b["mass"], np.array(b["position"], float) - cg)
+    acc = acc - _steiner(m0, p0 - cg)
+    e = np.linalg.eigvalsh(acc)
+    if e[0] > 0 and e[0] + e[1] >= e[2] * 0.99:
+        return
+    delta = max((1.0101 * e[2] - e[0] - e[1]) / 0.9899, 1e-3 - e[0], 0.0) * 1.05
+    for k in ("Ixx", "Iyy", "Izz"):
+        ch["inertia"][k] = round(ch["inertia"][k] + delta, 3)
+    ch["_inertia_source"] = (str(ch.get("_inertia_source", "")) +
+                             f" Raised by {delta:.1f} kg*m2 on each axis so the inertia left after the listed bodies is physical (spec 7.4, v0.111).").strip()
+
+
 def declare_glb_axes(svj: Dict) -> None:
     """Once an SVJ has a mesh asset, its coordinate_system describes the asset's axes."""
     if svj.get("assets", {}).get("meshes"):
@@ -2681,6 +2755,7 @@ def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
     declare_glb_axes(svj)
     apply_collision_sidecar(svj, p)
     to_iso_8855(svj)
+    finish_v111(svj)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(svj, fh, indent=indent, ensure_ascii=False)
