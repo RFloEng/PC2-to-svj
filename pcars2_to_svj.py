@@ -59,7 +59,8 @@ Requirements
   scipy / numpy optional: enables Pacejka fitting (falls back to estimation).
 
 SVJ schema version targeted: 0.102 (unified suspension, spec section 25)
-Coordinate convention: SAE J670 (Z-down).  CG Z is set to zero pending extraction.
+Coordinate convention: the converter builds in SAE J670 (Z-down) and write_svj converts the
+finished file to ISO 8855 (X fwd, Y left, Z up; spec 0.109) with the standard's own tool.
 Units: SI — kg, m, N, Pa, N·m, rad.
 """
 
@@ -138,7 +139,7 @@ except ImportError:
 # Directory / file helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.106"
+SVJ_VERSION = "0.109"
 _migrator = None
 
 
@@ -978,6 +979,7 @@ def build_engine(sf_edf: Optional[ShCBFile], car: str) -> Dict:
 
     # max_rpm: prefer the rev-limiter scalar; fall back to heuristic
     max_rpm = round(rev_lim if rev_lim > 0 else (pts[-1][0] if pts else 8000), 0)
+    pts = [p for p in pts if p[0] <= max_rpm] or pts      # spec 0.107: the curve ends at max_rpm
 
     return {
         "idle_rpm":    round(idle_rpm, 0),
@@ -2623,10 +2625,27 @@ def apply_collision_sidecar(svj: Dict, svj_path: Any) -> Optional[Dict[str, int]
 GLB_AXES = {"up": "Y", "forward": "-Z", "handedness": "right"}
 
 
+def to_iso_8855(svj: Dict) -> None:
+    """Express the physics in ISO 8855 (spec 2.1, v0.109) with the standard's frame converter, in place."""
+    _load_migrator()                      # puts svj_migrate on sys.path
+    from svj_migrate import frame
+    md = svj.setdefault("_metadata", {})
+    md["physics_frame"] = "SAE_J670"      # what the converter built; frame.convert flips it
+    new, _notes = frame.convert(svj, "ISO_8855")
+    nmd = new["_metadata"]
+    if not isinstance(nmd.get("coordinate_system"), dict):
+        nmd.pop("physics_frame", None)    # a frame string in coordinate_system already says it
+    svj.clear()
+    svj.update(new)
+
+
 def declare_glb_axes(svj: Dict) -> None:
     """Once an SVJ has a mesh asset, its coordinate_system describes the asset's axes."""
     if svj.get("assets", {}).get("meshes"):
-        svj.setdefault("_metadata", {})["coordinate_system"] = dict(GLB_AXES)
+        md = svj.setdefault("_metadata", {})
+        if isinstance(md.get("coordinate_system"), str):
+            md["physics_frame"] = md["coordinate_system"]      # keep the physics frame explicit
+        md["coordinate_system"] = dict(GLB_AXES)
 
 
 def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
@@ -2661,6 +2680,7 @@ def write_svj(svj: Dict, out_path: str, indent: Optional[int] = 2) -> None:
             pass   # unreadable old file: just overwrite it
     declare_glb_axes(svj)
     apply_collision_sidecar(svj, p)
+    to_iso_8855(svj)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
         json.dump(svj, fh, indent=indent, ensure_ascii=False)

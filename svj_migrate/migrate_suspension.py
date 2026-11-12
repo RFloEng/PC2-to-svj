@@ -40,7 +40,7 @@ from .multibody_check import infer_joint_types
 from .suspension_view import _MAP_TYPE, _PREFIX, _hardpoint, _mean, _norm, _pos, _slug, _stations, _sub, quat_z_to
 
 VERSION = "0.100"
-UP = [0.0, 0.0, -1.0]                      # SAE: Z is down
+UP = [0.0, 0.0, 1.0]                       # only |dot| is used, so the sign (ISO up, SAE down) does not matter
 PART_TEXT = {
     "upright": "Upright / knuckle / hub carrier", "hub": "Rotating hub", "upper_wishbone": "Upper A-arm", "lower_wishbone": "Lower A-arm",
     "trailing_arm": "Trailing arm", "semi_trailing_arm": "Semi-trailing arm", "leading_arm": "Leading arm", "tie_rod": "Steering tie rod / track rod",

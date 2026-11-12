@@ -70,6 +70,9 @@ def main() -> None:
 
     (DEST / "multibody_check.py").write_text((tools / "multibody_check.py").read_text(encoding="utf-8"),
                                              encoding="utf-8")
+    (DEST / "frame.py").write_text(
+        HEADER.format(what="SAE J670 <-> ISO 8855 conversion of an SVJ document (spec 2.1, v0.109).")
+        + (tools / "convert_frame.py").read_text(encoding="utf-8").split("\n", 1)[1], encoding="utf-8")
     (DEST / "__init__.py").write_text(
         HEADER.format(what="The SVJ standard's suspension migration (corner section -> bodies, joints, elements).")
         + "from .migrate_suspension import migrate\n\n__all__ = [\"migrate\"]\n", encoding="utf-8")

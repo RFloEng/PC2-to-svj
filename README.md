@@ -1,10 +1,10 @@
 # PC2-to-svj
 
-Converts the cars in **Project CARS 2** and **Project CARS** and **Automobilista 2** into SVJ (Standard Vehicle JSON) v0.106 files, with matching 3D models (**GLB** and **OpenUSD**).
+Converts the cars in **Project CARS 2** and **Project CARS** and **Automobilista 2** into SVJ (Standard Vehicle JSON) v0.109 files, with matching 3D models (**GLB** and **OpenUSD**).
 
 You point it at your own Project CARS 2 (or Project CARS) installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
-- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.106 schema
+- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.109 schema
 - one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse, normal and specular textures), linked from the SVJ file through SVJ visual bindings
 - one `.usdz` per car, an OpenUSD copy of that model (spec 22.10) with the textures baked in. The SVJ file lists the USD as its model asset and keeps the GLB as the `preview` copy for viewers that read glTF only
 
@@ -27,7 +27,7 @@ All 212 drivable Project CARS 2 cars convert. Project CARS is supported through 
   _pcars2/tools/win-x64/PCarsTools.exe
   ```
 - A .NET runtime, version 7 or newer. PCarsTools targets .NET 6; the converter lets it run on a newer runtime automatically.
-- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.106), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
+- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.109), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
 
 You don't need to download anything else. PCarsTools expects an Oodle DLL named `oo2core_7_win64.dll`, and the converter copies the game's own `oo2core_4_win64.dll` under that name.
 
@@ -143,11 +143,11 @@ Every value is either decoded from the game files or a flagged estimate. Estimat
 
 **Hinged parts and collision proxies** come from the plain-text collision XML in each car's vehicle archive (`pcars2_extract_meshes.py`, with `--vhf-only` for a fast pass without meshes). Each convex hull becomes a box proxy (`collision[]`, spec §28); parts with a hinge descriptor (bonnet, boot, bumpers, …) become bodies with the game's mass, a revolute joint and an `<part>_open` pose (§24). The extraction saves `<car>.collision.json` beside the SVJ file and later physics conversions reapply it. Masses, box inertias and the closed-pose angle are flagged estimates; the hinge axis is oriented so a positive angle lifts the part.
 
-**Coordinates** follow SVJ's SAE J670 convention: X forward, Y right, Z down, origin at the front-axle midpoint on the ground. Units are SI, except engine displacement, which the SVJ spec gives in litres.
+**Coordinates** follow SVJ's ISO 8855 convention (spec 2.1, v0.109): X forward, Y left, Z up, origin at the front-axle midpoint on the ground. Units are SI, except engine displacement, which the SVJ spec gives in litres.
 
 **3D models** follow SVJ spec 22.4: glTF Y-up, +X right, -Z forward, with the origin at the front-axle midpoint on the ground, so a GLB lines up with the SVJ's hardpoints without any extra transform. The game's mesh space is left-handed, so the conversion mirrors it (and reverses triangle winding). Each part is placed using the game's own scene hierarchy (`.vhf`), so wheels, discs, calipers and the steering wheel sit where they do in the game. Parts are grouped under nodes named by the SVJ naming convention (`SVJ::body::chassis`, `SVJ::wheel::wheel_fl`, `SVJ::brake::disc_fl`, `SVJ::steering::wheel`, …), and the SVJ file binds only the nodes its GLB actually contains.
 
-**OpenUSD** (spec 22.10, v0.105 / v0.106). `svj_usd.py` converts each GLB with the specification's `tools/gltf2usd.py` (metres, the `SVJ::category::id` names as `svj:node`, UsdPreviewSurface materials with base colour, normal, metallic-roughness, occlusion and emissive textures baked into the `.usdz`) and rewrites the car's `assets.meshes` entry as `uri` `<car>.usdz`, `format` `usd`, `preview` `<car>.glb`. Only shapes and appearance go into the USD; every physical datum stays in the SVJ JSON, as the spec requires. The glTF specular-colour map (`KHR_materials_specular`) is not carried over by the specification's converter, so only the GLB keeps it. Because the GLB axes are Y-up and -Z forward while the physics stays SAE J670, a car with a model declares `_metadata.coordinate_system` as `{up: Y, forward: -Z, handedness: right}` (spec 22.4); the spec's `integrity_check.py --meshes` checks both files.
+**OpenUSD** (spec 22.10, v0.105 / v0.109). `svj_usd.py` converts each GLB with the specification's `tools/gltf2usd.py` (metres, the `SVJ::category::id` names as `svj:node`, UsdPreviewSurface materials with base colour, normal, metallic-roughness, occlusion and emissive textures baked into the `.usdz`) and rewrites the car's `assets.meshes` entry as `uri` `<car>.usdz`, `format` `usd`, `preview` `<car>.glb`. Only shapes and appearance go into the USD; every physical datum stays in the SVJ JSON, as the spec requires. The glTF specular-colour map (`KHR_materials_specular`) is not carried over by the specification's converter, so only the GLB keeps it. Because the GLB axes are Y-up and -Z forward while the physics is ISO 8855, a car with a model declares `_metadata.coordinate_system` as `{up: Y, forward: -Z, handedness: right}` and the physics frame in `_metadata.physics_frame` (spec 22.4); the spec's `integrity_check.py --meshes` checks both files.
 
 ## Known limitations
 
