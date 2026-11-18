@@ -4,7 +4,7 @@ Converts the cars in **Project CARS 2** and **Project CARS** and **Automobilista
 
 You point it at your own Project CARS 2 (or Project CARS) installation. It unpacks the game's physics and vehicle archives locally, decodes them, and writes:
 
-- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.111 schema
+- one `.svj.json` per car (engine, gearbox, mass, suspension, tyres, aero, …), validated against the official SVJ v0.112 schema
 - one `.glb` per car (LOD-A body, wheels, brakes, interior, with diffuse, normal and specular textures), linked from the SVJ file through SVJ visual bindings
 - one `.usdz` per car, an OpenUSD copy of that model (spec 22.10) with the textures baked in. The SVJ file lists the USD as its model asset and keeps the GLB as the `preview` copy for viewers that read glTF only
 
@@ -27,7 +27,7 @@ All 212 drivable Project CARS 2 cars convert. Project CARS is supported through 
   _pcars2/tools/win-x64/PCarsTools.exe
   ```
 - A .NET runtime, version 7 or newer. PCarsTools targets .NET 6; the converter lets it run on a newer runtime automatically.
-- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.111), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
+- The [SVJ specification](https://github.com/RFloEng/SVJ-standard-vehicle-json) (v0.112), unpacked to `svj_spec/SVJ-standard-vehicle-json-main/`. The converter ships the standard's suspension migration in `svj_migrate/`; the specification folder provides the schema for validation.
 
 You don't need to download anything else. PCarsTools expects an Oodle DLL named `oo2core_7_win64.dll`, and the converter copies the game's own `oo2core_4_win64.dll` under that name.
 

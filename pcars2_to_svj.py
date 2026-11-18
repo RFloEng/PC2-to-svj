@@ -139,7 +139,7 @@ except ImportError:
 # Directory / file helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-SVJ_VERSION = "0.111"
+SVJ_VERSION = "0.112"
 _migrator = None
 
 
